@@ -16,52 +16,37 @@ st.set_page_config(
 API_URL = "https://api.sorare.com/graphql"
 IN_SEASON_YEAR = 2026
 
-# Riconoscimento rigoroso TOP 5 LEGHE di PRIMA DIVISIONE
-# La Serie A è inclusa qui per Champion ma non ha la sua sezione a campionato singolo
-TOP_5_FIRST_DIVISION_SLUGS = [
-    "premier-league",
-    "england-premier-league",
-    "laliga-santander",
-    "spain-laliga",
-    "serie-a",
-    "italy-serie-a",
-    "bundesliga",
-    "germany-bundesliga",
-    "ligue-1",
-    "france-ligue-1"
+# Identificatori esatti delle 5 leghe principali (Serie A compresa per Champion, no torneo singolo)
+EXACT_TOP_5_SLUGS = {
+    "premier-league", "england-premier-league",
+    "laliga-santander", "spain-laliga", "la-liga",
+    "bundesliga", "germany-bundesliga",
+    "ligue-1", "france-ligue-1",
+    "serie-a", "italy-serie-a"
+}
+
+# Campionati Challenger Europe
+CHALLENGER_KEYWORDS = [
+    "portugal", "primeira", "betclic", "eredivisie", "netherlands",
+    "jupiler", "belgium", "premiership", "scotland", "spfl",
+    "super-lig", "turkey", "austria", "swiss", "switzerland", "denmark", "superliga"
 ]
 
-# Esclusioni categoriche da Champion (seconde divisioni o leghe minori)
-EXCLUDED_FROM_TOP_5 = [
-    "bundesliga-2", "2-bundesliga", "germany-2", "segunda", "laliga-2",
-    "championship", "serie-b", "ligue-2", "premiership", "scotland"
-]
-
-# Campionati Challenger Europe (leghe europee primarie non top 5)
-CHALLENGER_LEAGUE_SLUGS = [
-    "eredivisie", "netherlands-eredivisie",
-    "liga-portugal", "portugal-primeira-liga",
-    "jupiler-pro-league", "belgium-pro-league",
-    "premiership", "scotland-premiership",
-    "super-lig", "turkey-super-lig",
-    "austrian-bundesliga", "swiss-super-league"
-]
-
-# Campionati domestici singoli disponibili (Serie A rimossa dai tornei singoli)
+# Mappatura campionati singoli
 DOMESTIC_LEAGUES_MAP = {
-    "Premier League": ["premier-league", "england-premier-league"],
-    "LaLiga EA Sports": ["laliga-santander", "spain-laliga"],
-    "Bundesliga (1. Divisione)": ["bundesliga", "germany-bundesliga"],
-    "Ligue 1": ["ligue-1", "france-ligue-1"],
-    "Eredivisie": ["eredivisie", "netherlands-eredivisie"],
-    "Liga Portugal": ["liga-portugal", "portugal-primeira-liga"],
-    "Jupiler Pro League": ["jupiler-pro-league", "belgium-pro-league"],
-    "Scottish Premiership": ["premiership", "scotland-premiership"],
+    "Premier League": ["premier-league", "england-premier-league", "premier"],
+    "LaLiga EA Sports": ["laliga-santander", "spain-laliga", "laliga"],
+    "Bundesliga": ["germany-bundesliga", "bundesliga"],
+    "Ligue 1": ["france-ligue-1", "ligue-1"],
+    "Liga Portugal": ["portugal", "primeira", "betclic"],
+    "Eredivisie": ["eredivisie", "netherlands"],
+    "Jupiler Pro League": ["jupiler", "belgium"],
+    "Scottish Premiership": ["premiership", "scotland", "spfl"],
     "MLS": ["mls", "major-league-soccer"]
 }
 
 # Club partecipanti a UEFA Champions League
-UCL_CLUBS_KEYWORDS = [
+UCL_CLUBS = [
     "manchester city", "arsenal", "liverpool", "aston villa",
     "real madrid", "barcelona", "atlético", "atletico", "girona",
     "inter", "milan", "juventus", "atalanta", "bologna",
@@ -71,14 +56,14 @@ UCL_CLUBS_KEYWORDS = [
     "celtic", "club brugge", "shakhtar", "dinamo zagreb", "salzburg", "young boys", "crvena zvezda", "sparta praha", "sturm graz"
 ]
 
-# Club partecipanti a UEFA Europa League & Conference League
-UEL_UECL_CLUBS_KEYWORDS = [
+# Club partecipanti a UEFA Europa & Conference League
+UEL_UECL_CLUBS = [
     "manchester united", "tottenham", "chelsea",
     "roma", "lazio", "fiorentina",
     "real sociedad", "athletic club", "real betis",
     "frankfurt", "hoffenheim", "heidenheim",
     "nice", "lyon", "lens",
-    "porto", "braga", "vitória", "guimaraes",
+    "braga", "vitória", "guimaraes",
     "ajax", "twente", "alkmaar", "az",
     "anderlecht", "union saint-gilloise", "gent", "cercle brugge",
     "rangers", "heart", "hearts", "aberdeen",
@@ -88,6 +73,7 @@ UEL_UECL_CLUBS_KEYWORDS = [
 
 HOT_STREAK_STEPS = [320, 360, 380, 420, 440, 470, 550]
 
+# Query GraphQL: richiede la posizione della specifica carta oltre a quella del player
 QUERY_USER_GALLERY = """
 query GetUserGalleryCards($slug: String!, $cursor: String) {
   user(slug: $slug) {
@@ -100,6 +86,7 @@ query GetUserGalleryCards($slug: String!, $cursor: String) {
         slug
         rarityTyped
         ... on Card {
+          positionTyped
           season {
             startYear
           }
@@ -167,7 +154,7 @@ def fetch_gallery_data(raw_slug):
             nodes = cards_connection.get("nodes", []) if isinstance(cards_connection, dict) else []
             
             for card in nodes:
-                # FILTRO RIGIDO: SOLO LIMITED
+                # FILTRO ESCLUSIVO: SOLO LIMITED
                 rarity = str(card.get("rarityTyped", "")).lower()
                 if rarity != "limited":
                     continue
@@ -189,7 +176,12 @@ def fetch_gallery_data(raw_slug):
                 floor_idx = round(mean_l5 * 0.8, 1)
                 ceiling_idx = round(mean_l5 * 1.35, 1)
 
-                raw_pos = str(player.get("position", "")).strip().upper()
+                # Priorità alla posizione stampata su questa singola carta (es. Olise FW)
+                card_pos = card.get("positionTyped")
+                if not card_pos:
+                    card_pos = player.get("position", "")
+                norm_pos = str(card_pos).strip().upper()
+
                 l_slug = str(domestic_league.get("slug", "")).lower().strip()
                 l_name = str(domestic_league.get("name", "Altro"))
                 club_n = str(active_club.get("name", "Svincolato"))
@@ -198,7 +190,7 @@ def fetch_gallery_data(raw_slug):
                     "card_slug": card.get("slug"),
                     "player_slug": player.get("slug"),
                     "name": player.get("displayName"),
-                    "position": raw_pos,
+                    "position": norm_pos,
                     "rarity": "Limited",
                     "season_year": card_year,
                     "is_in_season": is_in_season,
@@ -207,6 +199,7 @@ def fetch_gallery_data(raw_slug):
                     "club_lower": club_n.lower(),
                     "league_slug": l_slug,
                     "league_name": l_name,
+                    "league_combined": f"{l_name} {l_slug}".lower(),
                     "l5_avg": round(mean_l5, 1),
                     "floor_idx": floor_idx,
                     "ceiling_idx": ceiling_idx,
@@ -302,12 +295,14 @@ if st.sidebar.button("🗑️ Sblocca Formazioni"):
     st.session_state["saved_lineups"] = {}
     st.rerun()
 
-# Filtraggio rigoroso
-def is_top_5_league(slug):
-    # Deve contenere una top 5 ma NON contenere divisioni inferiori
-    is_match = any(top in slug for top in TOP_5_FIRST_DIVISION_SLUGS)
-    is_excluded = any(exc in slug for exc in EXCLUDED_FROM_TOP_5)
-    return is_match and not is_excluded
+# Logica di assegnazione torneo rigorosa
+def is_genuine_top_5(row):
+    slug = row["league_slug"]
+    # Escludi categoricamente 2. divisioni e leghe secondarie
+    if any(ex in slug for ex in ["bundesliga-2", "2-bundesliga", "segunda", "serie-b", "ligue-2", "championship"]):
+        return False
+    # Accetta solo le vere prime divisioni
+    return slug in EXACT_TOP_5_SLUGS or any(t == slug for t in EXACT_TOP_5_SLUGS)
 
 def filter_eligible_cards(data, main_cat, comp_name, single_choice, exclude_locked=True):
     temp = data.copy()
@@ -315,33 +310,35 @@ def filter_eligible_cards(data, main_cat, comp_name, single_choice, exclude_lock
         temp = temp[~temp["card_slug"].isin(st.session_state["locked_cards"])]
         
     if main_cat == "Champion Europe (Top 5 Leghe)":
-        temp = temp[temp["league_slug"].apply(is_top_5_league)]
+        temp = temp[temp.apply(is_genuine_top_5, axis=1)]
         if "In-Season" in comp_name:
             temp = temp[temp["is_in_season"]]
 
     elif main_cat == "Challenger Europe":
-        temp = temp[temp["league_slug"].apply(lambda s: any(ch_slug in s for ch_slug in CHALLENGER_LEAGUE_SLUGS))]
+        # Campionati europei non-Top 5 (es. Austria con Demir, Scozia con Celtic/Hearts, Portogallo, Olanda, Belgio, Turchia)
+        temp = temp[~temp.apply(is_genuine_top_5, axis=1)]
+        temp = temp[temp["league_combined"].apply(lambda s: any(k in s for k in CHALLENGER_KEYWORDS))]
         if "In-Season" in comp_name:
             temp = temp[temp["is_in_season"]]
 
     elif main_cat == "UEFA Champions League":
-        pattern = "|".join(UCL_CLUBS_KEYWORDS)
+        pattern = "|".join(UCL_CLUBS)
         temp = temp[temp["club_lower"].str.contains(pattern, na=False)]
         if "In-Season" in comp_name:
             temp = temp[temp["is_in_season"]]
 
     elif main_cat == "UEFA Europa & Conference League":
-        pattern = "|".join(UEL_UECL_CLUBS_KEYWORDS)
+        pattern = "|".join(UEL_UECL_CLUBS)
         temp = temp[temp["club_lower"].str.contains(pattern, na=False)]
         if "In-Season" in comp_name:
             temp = temp[temp["is_in_season"]]
 
     elif main_cat == "Campionato Singolo Domestico":
-        allowed_slugs = DOMESTIC_LEAGUES_MAP.get(single_choice, [])
+        allowed_keywords = DOMESTIC_LEAGUES_MAP.get(single_choice, [])
         if "Bundesliga" in single_choice:
-            temp = temp[temp["league_slug"].apply(lambda s: any(t in s for t in allowed_slugs) and not any(e in s for e in EXCLUDED_FROM_TOP_5))]
+            temp = temp[temp.apply(is_genuine_top_5, axis=1) & temp["league_slug"].str.contains("bundesliga", na=False)]
         else:
-            temp = temp[temp["league_slug"].apply(lambda s: any(target in s for target in allowed_slugs))]
+            temp = temp[temp["league_combined"].apply(lambda s: any(k in s for k in allowed_keywords))]
 
     elif main_cat == "All-Star (Tutti i campionati)":
         pass
@@ -457,6 +454,7 @@ with tab_h2h:
             p1 = df[df["card_slug"] == card_list[c1_key]].iloc[0]
             st.markdown(f"### {p1['name']}")
             st.caption(f"Squadra: **{p1['club_name']}** ({p1['league_name']})")
+            st.write(f"• **Ruolo Carta:** {p1['position']}")
             st.write(f"• **Rarità:** 🟡 Limited")
             st.write(f"• **Stagione:** {'🟢 In-Season' if p1['is_in_season'] else '⚪ Classic'}")
             st.write(f"• **Moltiplicatore Totale:** x{p1['multiplier']:.2f}")
@@ -469,6 +467,7 @@ with tab_h2h:
             p2 = df[df["card_slug"] == card_list[c2_key]].iloc[0]
             st.markdown(f"### {p2['name']}")
             st.caption(f"Squadra: **{p2['club_name']}** ({p2['league_name']})")
+            st.write(f"• **Ruolo Carta:** {p2['position']}")
             st.write(f"• **Rarità:** 🟡 Limited")
             st.write(f"• **Stagione:** {'🟢 In-Season' if p2['is_in_season'] else '⚪ Classic'}")
             st.write(f"• **Moltiplicatore Totale:** x{p2['multiplier']:.2f}")
@@ -489,7 +488,7 @@ with tab_gallery:
             "name": "Calciatore",
             "club_name": "Club Attuale",
             "league_name": "Campionato",
-            "position": "Ruolo",
+            "position": "Ruolo Carta",
             "is_in_season": "Stagionalità",
             "multiplier": "Moltiplicatore",
             "l5_avg": "Media L5",
