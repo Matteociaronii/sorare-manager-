@@ -32,32 +32,34 @@ DOMESTIC_LEAGUES = {
 TOP_5_LEAGUES = ["premier-league", "laliga-santander", "serie-a", "bundesliga", "ligue-1"]
 HOT_STREAK_STEPS = [320, 360, 380, 420, 440, 470, 550]
 
-# Query GraphQL ufficiale e stabile per galleria utente
+# Query GraphQL corretta con i nodes per AnyCardInterfaceConnection
 QUERY_USER_GALLERY = """
 query GetUserGalleryCards($slug: String!) {
   user(slug: $slug) {
     nickname
     cards {
-      slug
-      rarity
-      xpBonus
-      season {
-        startYear
-      }
-      player {
+      nodes {
         slug
-        displayName
-        position
-        activeClub {
+        rarity
+        xpBonus
+        season {
+          startYear
+        }
+        player {
           slug
-          name
-          domesticLeague {
+          displayName
+          position
+          activeClub {
             slug
             name
+            domesticLeague {
+              slug
+              name
+            }
           }
+          lastFiveSo5Scores
+          lastFifteenSo5Scores
         }
-        lastFiveSo5Scores
-        lastFifteenSo5Scores
       }
     }
   }
@@ -101,8 +103,10 @@ def fetch_gallery_data(raw_slug):
             st.sidebar.warning("Utente non trovato su Sorare.")
             return pd.DataFrame()
             
-        raw_cards = user_node.get("cards", []) or []
-        for card in raw_cards:
+        cards_connection = user_node.get("cards", {}) or {}
+        nodes = cards_connection.get("nodes", []) if isinstance(cards_connection, dict) else []
+        
+        for card in nodes:
             player = card.get("player")
             if not player:
                 continue
