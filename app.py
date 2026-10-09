@@ -16,7 +16,7 @@ st.set_page_config(
 API_URL = "https://api.sorare.com/graphql"
 IN_SEASON_YEAR = 2026
 
-# Campionati domestici disponibili (Serie A rimossa dai soli tornei singoli)
+# Campionati domestici disponibili (Serie A rimossa dai tornei singoli)
 DOMESTIC_LEAGUES = {
     "premier-league": "Premier League",
     "laliga-santander": "LaLiga EA Sports",
@@ -32,7 +32,7 @@ DOMESTIC_LEAGUES = {
 TOP_5_LEAGUES = ["premier-league", "laliga-santander", "serie-a", "bundesliga", "ligue-1"]
 HOT_STREAK_STEPS = [320, 360, 380, 420, 440, 470, 550]
 
-# Query GraphQL precisa per AnyCardInterface
+# Query GraphQL corretta e compatibile con lo schema Card di Sorare
 QUERY_USER_GALLERY = """
 query GetUserGalleryCards($slug: String!) {
   user(slug: $slug) {
@@ -42,7 +42,6 @@ query GetUserGalleryCards($slug: String!) {
         slug
         rarityTyped
         ... on Card {
-          xpBonus
           season {
             startYear
           }
@@ -116,9 +115,8 @@ def fetch_gallery_data(raw_slug):
             domestic_league = active_club.get("domesticLeague") or {}
             card_year = card.get("season", {}).get("startYear", 0)
             is_in_season = (card_year == IN_SEASON_YEAR)
-            xp_bonus = card.get("xpBonus", 0.0)
             season_bonus = 0.05 if is_in_season else 0.0
-            card_multiplier = 1.0 + xp_bonus + season_bonus
+            card_multiplier = 1.0 + season_bonus
             
             l5 = [x for x in (player.get("lastFiveSo5Scores") or []) if x is not None]
             l15 = [x for x in (player.get("lastFifteenSo5Scores") or []) if x is not None]
