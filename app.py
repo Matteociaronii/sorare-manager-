@@ -14,11 +14,8 @@ st.set_page_config(
 )
 
 API_URL = "https://api.sorare.com/graphql"
-IN_SEASON_YEAR = 2026  # Ciclo stagionale 2026/2027
+IN_SEASON_YEAR = 2026
 
-# ==========================================
-# MAPPATURA UFFICIALE CAMPIONATI & COMPETIZIONI
-# ==========================================
 DOMESTIC_LEAGUES = {
     "liga-portugal": "Liga Portugal Betclic",
     "premiership": "Scottish Premiership (SPFL)",
@@ -35,9 +32,6 @@ DOMESTIC_LEAGUES = {
 TOP_5_LEAGUES = ["premier-league", "laliga-santander", "serie-a", "bundesliga", "ligue-1"]
 HOT_STREAK_STEPS = [320, 360, 380, 420, 440, 470, 550]
 
-# ==========================================
-# GRAPHQL QUERY (CLUB ATTUALE + CARD SLUG)
-# ==========================================
 QUERY_GALLERY = """
 query GetUserGalleryDetailed($slug: String!,$cursor: String) {
   user(slug: $slug) {
@@ -74,82 +68,100 @@ query GetUserGalleryDetailed($slug: String!,$cursor: String) {
 }
 """
 
-# ==========================================
-# FETCH & PROCESS DATI GALLERIA
-# ==========================================
+def extract_slug(input_val):
+    val = input_val.strip()
+    if "my-club/" in val:
+        val = val.split("my-club/")[-1].split("?")[0].strip("/")
+    elif "sorare.com/" in val:
+        val = val.split("/")[-1].split("?")[0]
+    return val
+
 @st.cache_data(ttl=600, show_spinner=False)
-def fetch_gallery_data(user_slug):
+def fetch_gallery_data(raw_slug):
+    user_slug = extract_slug(raw_slug)
     cards_data = []
     cursor = None
     has_next = True
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; SorareLineupBuilder/1.0)"}
     
     while has_next:
         variables = {"slug": user_slug, "cursor": cursor}
-        resp = requests.post(API_URL, json={"query": QUERY_GALLERY, "variables": variables})
-        if resp.status_code != 200:
-            break
-        
-        data = resp.json().get("data", {}).get("user", {}).get("cards", {})
-        nodes = data.get("nodes", [])
-        
-        for card in nodes:
-            player = card.get("player")
-            if not player:
-                continue
+        try:
+            resp = requests.post(API_URL, json={"query": QUERY_GALLERY, "variables": variables}, headers=headers, timeout=12)
+            if resp.status_code != 200:
+                st.sidebar.error(f"Errore Sorare API (Status: {resp.status_code})")
+                break
             
-            active_club = player.get("activeClub") or {}
-            domestic_league = active_club.get("domesticLeague") or {}
-            
-            card_year = card.get("season", {}).get("startYear", 0)
-            is_in_season = (card_year == IN_SEASON_YEAR)
-            
-            xp_bonus = card.get("xpBonus", 0.0)
-            season_bonus = 0.05 if is_in_season else 0.0
-            card_multiplier = 1.0 + xp_bonus + season_bonus
-            
-            l5 = [x for x in (player.get("lastFiveSo5Scores") or []) if x is not None]
-            l15 = [x for x in (player.get("lastFifteenSo5Scores") or []) if x is not None]
-            
-            if not l5:
-                l5 = [35.0]
-            if not l15:
-                l15 = l5
+            resp_json = resp.json()
+            if "errors" in resp_json:
+                st.sidebar.error(f"Errore GraphQL: {resp_json['errors'][0].get('message', 'Non trovato')}")
+                break
                 
-            mean_l5 = float(np.mean(l5))
-            floor_idx = float(np.percentile(l15, 20)) if len(l15) >= 3 else mean_l5 * 0.8
-            ceiling_idx = float(np.percentile(l15, 85)) if len(l15) >= 3 else mean_l5 * 1.2
-            starter_rate = float(sum(1 for s in l5 if s >= 35) / len(l5)) * 100.0
-
-            cards_data.append({
-                "card_slug": card.get("slug"),
-                "player_slug": player.get("slug"),
-                "name": player.get("displayName"),
-                "position": player.get("position"),
-                "rarity": card.get("rarity"),
-                "season_year": card_year,
-                "is_in_season": is_in_season,
-                "multiplier": card_multiplier,
-                "club_name": active_club.get("name", "Svincolato"),
-                "club_slug": active_club.get("slug", ""),
-                "league_slug": domestic_league.get("slug", "other"),
-                "league_name": domestic_league.get("name", "Altro Campionato"),
-                "l5_avg": round(mean_l5, 1),
-                "floor_idx": round(floor_idx, 1),
-                "ceiling_idx": round(ceiling_idx, 1),
-                "starter_rate": round(starter_rate, 1),
-                "l5_scores": l5,
-                "l15_scores": l15
-            })
+            user_node = resp_json.get("data", {}).get("user")
+            if not user_node:
+                break
+                
+            data = user_node.get("cards", {})
+            nodes = data.get("nodes", [])
             
-        page_info = data.get("pageInfo", {})
-        has_next = page_info.get("hasNextPage", False)
-        cursor = page_info.get("endCursor")
+            for card in nodes:
+                player = card.get("player")
+                if not player:
+                    continue
+                
+                active_club = player.get("activeClub") or {}
+                domestic_league = active_club.get("domesticLeague") or {}
+                
+                card_year = card.get("season", {}).get("startYear", 0)
+                is_in_season = (card_year == IN_SEASON_YEAR)
+                
+                xp_bonus = card.get("xpBonus", 0.0)
+                season_bonus = 0.05 if is_in_season else 0.0
+                card_multiplier = 1.0 + xp_bonus + season_bonus
+                
+                l5 = [x for x in (player.get("lastFiveSo5Scores") or []) if x is not None]
+                l15 = [x for x in (player.get("lastFifteenSo5Scores") or []) if x is not None]
+                
+                if not l5:
+                    l5 = [35.0]
+                if not l15:
+                    l15 = l5
+                    
+                mean_l5 = float(np.mean(l5))
+                floor_idx = float(np.percentile(l15, 20)) if len(l15) >= 3 else mean_l5 * 0.8
+                ceiling_idx = float(np.percentile(l15, 85)) if len(l15) >= 3 else mean_l5 * 1.2
+                starter_rate = float(sum(1 for s in l5 if s >= 35) / len(l5)) * 100.0
+
+                cards_data.append({
+                    "card_slug": card.get("slug"),
+                    "player_slug": player.get("slug"),
+                    "name": player.get("displayName"),
+                    "position": player.get("position"),
+                    "rarity": card.get("rarity"),
+                    "season_year": card_year,
+                    "is_in_season": is_in_season,
+                    "multiplier": card_multiplier,
+                    "club_name": active_club.get("name", "Svincolato"),
+                    "club_slug": active_club.get("slug", ""),
+                    "league_slug": domestic_league.get("slug", "other"),
+                    "league_name": domestic_league.get("name", "Altro"),
+                    "l5_avg": round(mean_l5, 1),
+                    "floor_idx": round(floor_idx, 1),
+                    "ceiling_idx": round(ceiling_idx, 1),
+                    "starter_rate": round(starter_rate, 1),
+                    "l5_scores": l5,
+                    "l15_scores": l15
+                })
+                
+            page_info = data.get("pageInfo", {})
+            has_next = page_info.get("hasNextPage", False)
+            cursor = page_info.get("endCursor")
+        except Exception as e:
+            st.sidebar.error(f"Errore connessione: {e}")
+            break
         
     return pd.DataFrame(cards_data)
 
-# ==========================================
-# SESSION STATE (STATO SALVATO TRA I CLIC)
-# ==========================================
 if "locked_cards" not in st.session_state:
     st.session_state["locked_cards"] = set()
 
@@ -160,16 +172,20 @@ if "saved_lineups" not in st.session_state:
 # SIDEBAR
 # ==========================================
 st.sidebar.title("⚽ Sorare Pro Hub")
-user_input = st.sidebar.text_input("Username Sorare", value="il-tuo-account-sorare")
+default_slug = "xt_matty-0d7de6d1-d3e9-42c5-b62a-6cd4dbd8d691"
+user_input = st.sidebar.text_input("Username o Link Club Sorare", value=default_slug)
 
 if st.sidebar.button("🔄 Sincronizza Dati GW"):
     st.cache_data.clear()
-    st.sidebar.success("Dati aggiornati!")
+    st.session_state["locked_cards"] = set()
+    st.session_state["saved_lineups"] = {}
+    st.sidebar.success("Cache svuotata!")
 
-df = fetch_gallery_data(user_input)
+with st.spinner("Scaricamento carte in corso..."):
+    df = fetch_gallery_data(user_input)
 
 if df.empty:
-    st.warning("Inserisci uno username valido nella barra laterale per caricare le carte.")
+    st.warning("Nessuna carta trovata o profilo non raggiungibile. Verifica lo slug o il link.")
     st.stop()
 
 st.sidebar.divider()
@@ -205,9 +221,6 @@ if st.sidebar.button("🗑️ Sblocca Tutte le Formazioni"):
     st.session_state["saved_lineups"] = {}
     st.rerun()
 
-# ==========================================
-# FILTRAGGIO CARTE ELEGGIBILI
-# ==========================================
 def filter_eligible_cards(data, comp_cat, comp_name, exclude_locked=True):
     temp = data.copy()
     if exclude_locked:
@@ -227,9 +240,6 @@ def filter_eligible_cards(data, comp_cat, comp_name, exclude_locked=True):
 
 eligible_df = filter_eligible_cards(df, comp_type, selected_competition)
 
-# ==========================================
-# INTERFACCIA A SCHEDE (TAB)
-# ==========================================
 tab_builder, tab_h2h, tab_gallery = st.tabs(["🏆 Builder Formazione", "⚔️ Head-to-Head (1v1)", "📊 Rosa & Club Attuali"])
 
 # --- TAB 1: BUILDER ---
@@ -362,8 +372,6 @@ with tab_h2h:
 # --- TAB 3: ROSA E CLUB ---
 with tab_gallery:
     st.subheader("📊 Rosa Completa & Club Contemporaneo")
-    st.caption("Verifica lo stato effettivo di ciascuna carta registrato sul database Sorare.")
-    
     display_df = df[["name", "club_name", "league_name", "position", "is_in_season", "multiplier", "l5_avg", "floor_idx", "ceiling_idx", "card_slug"]].copy()
     display_df["is_in_season"] = display_df["is_in_season"].apply(lambda x: "In-Season (2026)" if x else "Classic")
     display_df["is_locked"] = display_df["card_slug"].apply(lambda x: "🔒 Schierato" if x in st.session_state["locked_cards"] else "🟢 Libero")
