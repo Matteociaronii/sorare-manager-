@@ -16,41 +16,39 @@ st.set_page_config(
 API_URL = "https://api.sorare.com/graphql"
 IN_SEASON_YEAR = 2026
 
-# Raggruppamenti ufficiali Sorare
+# Raggruppamenti ufficiali Sorare Pro
 TOP_5_LEAGUES = ["premier-league", "laliga-santander", "serie-a", "bundesliga", "ligue-1"]
-CHALLENGER_LEAGUES = ["eredivisie", "liga-portugal", "jupiler-pro-league", "premiership", "super-lig", "austrian-bundesliga", "swiss-super-league"]
+CHALLENGER_LEAGUES = [
+    "eredivisie", "liga-portugal", "jupiler-pro-league",
+    "premiership", "super-lig", "austrian-bundesliga", "swiss-super-league"
+]
 HOT_STREAK_STEPS = [320, 360, 380, 420, 440, 470, 550]
 
-# Query ufficiale verificata con il nodo footballUserProfile
-QUERY_GALLERY = """
-query GetUserFootballCards($slug: String!) {
-  user(slug: $slug) {
-    nickname
-    footballUserProfile {
-      cards(first: 50) {
-        nodes {
+# Query ufficiale Sorare tramite il nodo paginato cards
+QUERY_USER_CARDS = """
+query GetUserCards($owner: String!) {
+  cards(owner: $owner, first: 50) {
+    nodes {
+      slug
+      rarity
+      xpBonus
+      season {
+        startYear
+      }
+      player {
+        slug
+        displayName
+        position
+        activeClub {
           slug
-          rarity
-          xpBonus
-          season {
-            startYear
-          }
-          player {
+          name
+          domesticLeague {
             slug
-            displayName
-            position
-            activeClub {
-              slug
-              name
-              domesticLeague {
-                slug
-                name
-              }
-            }
-            lastFiveSo5Scores
-            lastFifteenSo5Scores
+            name
           }
         }
+        lastFiveSo5Scores
+        lastFifteenSo5Scores
       }
     }
   }
@@ -78,7 +76,7 @@ def fetch_gallery_data(raw_slug):
     try:
         resp = requests.post(
             API_URL,
-            json={"query": QUERY_GALLERY, "variables": {"slug": user_slug}},
+            json={"query": QUERY_USER_CARDS, "variables": {"owner": user_slug}},
             headers=headers,
             timeout=15
         )
@@ -86,58 +84,56 @@ def fetch_gallery_data(raw_slug):
         
         if resp.status_code != 200 or "errors" in resp_json:
             err_msg = resp_json.get("errors", [{}])[0].get("message", f"Status {resp.status_code}")
-            st.sidebar.error(f"Errore Sorare API: {err_msg}")
+            st.sidebar.error(f"Dettaglio Sorare: {err_msg}")
             return pd.DataFrame()
             
-        user_node = resp_json.get("data", {}).get("user", {})
-        fb_profile = user_node.get("footballUserProfile") if user_node else None
+        cards_container = resp_json.get("data", {}).get("cards", {})
+        nodes = cards_container.get("nodes", []) if isinstance(cards_container, dict) else []
         
-        if fb_profile and "cards" in fb_profile:
-            nodes = fb_profile["cards"].get("nodes", [])
-            for card in nodes:
-                player = card.get("player")
-                if not player:
-                    continue
-                active_club = player.get("activeClub") or {}
-                domestic_league = active_club.get("domesticLeague") or {}
-                card_year = card.get("season", {}).get("startYear", 0)
-                is_in_season = (card_year == IN_SEASON_YEAR)
-                xp_bonus = card.get("xpBonus", 0.0)
-                season_bonus = 0.05 if is_in_season else 0.0
-                card_multiplier = 1.0 + xp_bonus + season_bonus
+        for card in nodes:
+            player = card.get("player")
+            if not player:
+                continue
+            active_club = player.get("activeClub") or {}
+            domestic_league = active_club.get("domesticLeague") or {}
+            card_year = card.get("season", {}).get("startYear", 0)
+            is_in_season = (card_year == IN_SEASON_YEAR)
+            xp_bonus = card.get("xpBonus", 0.0)
+            season_bonus = 0.05 if is_in_season else 0.0
+            card_multiplier = 1.0 + xp_bonus + season_bonus
+            
+            l5 = [x for x in (player.get("lastFiveSo5Scores") or []) if x is not None]
+            l15 = [x for x in (player.get("lastFifteenSo5Scores") or []) if x is not None]
+            if not l5:
+                l5 = [35.0]
+            if not l15:
+                l15 = l5
                 
-                l5 = [x for x in (player.get("lastFiveSo5Scores") or []) if x is not None]
-                l15 = [x for x in (player.get("lastFifteenSo5Scores") or []) if x is not None]
-                if not l5:
-                    l5 = [35.0]
-                if not l15:
-                    l15 = l5
-                    
-                mean_l5 = float(np.mean(l5))
-                floor_idx = float(np.percentile(l15, 20)) if len(l15) >= 3 else mean_l5 * 0.8
-                ceiling_idx = float(np.percentile(l15, 85)) if len(l15) >= 3 else mean_l5 * 1.2
-                starter_rate = float(sum(1 for s in l5 if s >= 35) / len(l5)) * 100.0
+            mean_l5 = float(np.mean(l5))
+            floor_idx = float(np.percentile(l15, 20)) if len(l15) >= 3 else mean_l5 * 0.8
+            ceiling_idx = float(np.percentile(l15, 85)) if len(l15) >= 3 else mean_l5 * 1.2
+            starter_rate = float(sum(1 for s in l5 if s >= 35) / len(l5)) * 100.0
 
-                cards_data.append({
-                    "card_slug": card.get("slug"),
-                    "player_slug": player.get("slug"),
-                    "name": player.get("displayName"),
-                    "position": player.get("position"),
-                    "rarity": card.get("rarity"),
-                    "season_year": card_year,
-                    "is_in_season": is_in_season,
-                    "multiplier": card_multiplier,
-                    "club_name": active_club.get("name", "Svincolato"),
-                    "club_slug": active_club.get("slug", ""),
-                    "league_slug": domestic_league.get("slug", "other"),
-                    "league_name": domestic_league.get("name", "Altro"),
-                    "l5_avg": round(mean_l5, 1),
-                    "floor_idx": round(floor_idx, 1),
-                    "ceiling_idx": round(ceiling_idx, 1),
-                    "starter_rate": round(starter_rate, 1),
-                    "l5_scores": l5,
-                    "l15_scores": l15
-                })
+            cards_data.append({
+                "card_slug": card.get("slug"),
+                "player_slug": player.get("slug"),
+                "name": player.get("displayName"),
+                "position": player.get("position"),
+                "rarity": card.get("rarity"),
+                "season_year": card_year,
+                "is_in_season": is_in_season,
+                "multiplier": card_multiplier,
+                "club_name": active_club.get("name", "Svincolato"),
+                "club_slug": active_club.get("slug", ""),
+                "league_slug": domestic_league.get("slug", "other"),
+                "league_name": domestic_league.get("name", "Altro"),
+                "l5_avg": round(mean_l5, 1),
+                "floor_idx": round(floor_idx, 1),
+                "ceiling_idx": round(ceiling_idx, 1),
+                "starter_rate": round(starter_rate, 1),
+                "l5_scores": l5,
+                "l15_scores": l15
+            })
     except Exception as e:
         st.sidebar.error(f"Errore connessione: {e}")
 
@@ -166,7 +162,7 @@ with st.spinner("Scaricamento della tua galleria Sorare..."):
     df = fetch_gallery_data(user_input)
 
 if df.empty:
-    st.warning("Nessuna carta trovata per questo account o connessione in corso. Verifica lo username.")
+    st.warning("Nessuna carta trovata per questo account o recupero in corso. Se il caricamento fallisce, controlla il messaggio di errore nella barra laterale.")
     st.stop()
 
 st.sidebar.divider()
@@ -184,17 +180,17 @@ if game_mode.startswith("Pro"):
 st.sidebar.divider()
 st.sidebar.subheader("Competizione Ufficiale")
 
-# Tornei reali Sorare Pro
+# Tornei reali Sorare Pro (senza campionati singoli)
 selected_competition = st.sidebar.selectbox(
     "Scegli Torneo Sorare",
     [
-        "Champion Europe (In-Season)",
         "Champion Europe (Classic)",
-        "Challenger Europe (In-Season)",
+        "Champion Europe (In-Season)",
         "Challenger Europe (Classic)",
+        "Challenger Europe (In-Season)",
         "UEFA Champions League",
         "All-Star (Tutti i campionati)",
-        "Mostra Tutta la Galleria (Senza Filtri)"
+        "Tutte le Carte (Senza Filtri)"
     ]
 )
 
@@ -216,8 +212,8 @@ def filter_eligible_cards(data, comp_name, exclude_locked=True):
         temp = temp[(temp["league_slug"].isin(CHALLENGER_LEAGUES)) & (temp["is_in_season"])]
     elif comp_name == "Challenger Europe (Classic)":
         temp = temp[temp["league_slug"].isin(CHALLENGER_LEAGUES)]
-    elif comp_name == "All-Star (Tutti i campionati)" or comp_name == "Mostra Tutta la Galleria (Senza Filtri)":
-        pass  # Mostra tutte le carte senza escludere nessuno
+    elif comp_name in ["All-Star (Tutti i campionati)", "Tutte le Carte (Senza Filtri)"]:
+        pass
         
     return temp
 
