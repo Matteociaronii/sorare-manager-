@@ -88,11 +88,11 @@ HEADERS = {
     "Accept": "application/json"
 }
 
-# Query leggera e stabile: estrae grade (livello XP), stagionalità e dati anagrafici
+# Query leggera senza errori di schema e con complessità contenuta
 QUERY_USER_GALLERY = """
 query GetUserGalleryCards($slug: String!,$cursor: String) {
   user(slug: $slug) {
-    cards(first: 15, after: $cursor) {
+    cards(first: 20, after: $cursor) {
       pageInfo {
         hasNextPage
         endCursor
@@ -137,7 +137,7 @@ def extract_slug(input_val):
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_gallery_data(raw_slug):
     user_slug = extract_slug(raw_slug)
-    cards_data = []
+    raw_cards = []
     cursor = None
     has_next = True
     
@@ -165,7 +165,7 @@ def fetch_gallery_data(raw_slug):
             nodes = cards_connection.get("nodes", []) if isinstance(cards_connection, dict) else []
             
             for card in nodes:
-                # FILTRO ESCLUSIVO: SOLO CARTE LIMITED
+                # FILTRO ESCLUSIVO: SOLO LIMITED
                 rarity = str(card.get("rarityTyped", "")).lower()
                 if rarity != "limited":
                     continue
@@ -177,15 +177,7 @@ def fetch_gallery_data(raw_slug):
                 domestic_league = active_club.get("domesticLeague") or {}
                 card_year = card.get("season", {}).get("startYear", 0)
                 is_in_season = (card_year == IN_SEASON_YEAR)
-                
-                # CALCOLO PUNTUALE DEI BONUS EFFETTIVI
-                # Grade (livello carta): 0.5% per livello su Limited
                 grade_val = card.get("grade") or 0
-                xp_bonus_pct = float(grade_val) * 0.5
-                season_bonus_pct = 5.0 if is_in_season else 0.0
-                
-                total_bonus_pct = round(xp_bonus_pct + season_bonus_pct, 1)
-                card_multiplier = 1.0 + (total_bonus_pct / 100.0)
 
                 l5_apps = player.get("lastFiveSo5Appearances", 0) or 0
                 starter_rate = round(min(100.0, (l5_apps / 5.0) * 100.0), 1)
@@ -204,17 +196,15 @@ def fetch_gallery_data(raw_slug):
                 club_n = str(active_club.get("name", "Svincolato"))
                 league_full_text = f"{l_name} {l_slug}".lower()
 
-                cards_data.append({
+                raw_cards.append({
                     "card_slug": card.get("slug"),
                     "player_slug": player.get("slug"),
                     "name": player.get("displayName"),
                     "position": norm_pos,
                     "rarity": "Limited",
                     "season_year": card_year,
-                    "grade": grade_val,
+                    "grade": int(grade_val),
                     "is_in_season": is_in_season,
-                    "bonus_pct": total_bonus_pct,
-                    "multiplier": card_multiplier,
                     "club_name": club_n,
                     "club_lower": club_n.lower(),
                     "league_slug": l_slug,
@@ -234,7 +224,40 @@ def fetch_gallery_data(raw_slug):
             st.sidebar.error(f"Errore connessione: {e}")
             break
 
-    return pd.DataFrame(cards_data)
+    if not raw_cards:
+        return pd.DataFrame()
+
+    temp_df = pd.DataFrame(raw_cards)
+
+    # CALCOLO DINAMICO COLLEZIONE SULLA TUA ROSA:
+    # Rileva i club per cui hai una collezione attiva (almeno 2 carte dello stesso club)
+    club_counts = temp_df.groupby("club_lower")["card_slug"].count().to_dict()
+
+    processed_cards = []
+    for _, row in temp_df.iterrows():
+        # 1. Bonus Livello (XP): 1% per livello
+        xp_bonus = float(row["grade"]) * 1.0
+        
+        # 2. Bonus Stagionale: +5% se In-Season, 0% se Classic
+        season_bonus = 5.0 if row["is_in_season"] else 0.0
+        
+        # 3. Bonus Collezione Club: +5% se hai la collezione del club attiva nella tua rosa
+        # (Es. Benfica, Porto, o qualsiasi club con 2+ carte Limited nella tua collezione)
+        has_collection = (club_counts.get(row["club_lower"], 0) >= 2)
+        collection_bonus = 5.0 if has_collection else 0.0
+        
+        # TOTALE UFFICIALE (es. Samuel Soares = 5% IS + 3% Lvl + 5% Coll = 13.0%)
+        total_bonus_pct = round(season_bonus + xp_bonus + collection_bonus, 1)
+        card_multiplier = 1.0 + (total_bonus_pct / 100.0)
+
+        card_dict = dict(row)
+        card_dict["xp_bonus"] = xp_bonus
+        card_dict["collection_bonus"] = collection_bonus
+        card_dict["bonus_pct"] = total_bonus_pct
+        card_dict["multiplier"] = card_multiplier
+        processed_cards.append(card_dict)
+
+    return pd.DataFrame(processed_cards)
 
 if "locked_cards" not in st.session_state:
     st.session_state["locked_cards"] = set()
@@ -255,7 +278,7 @@ if st.sidebar.button("🔄 Sincronizza Dati GW"):
     st.session_state["saved_lineups"] = {}
     st.sidebar.success("Cache aggiornata!")
 
-with st.spinner("Scaricamento delle tue carte Limited con tutti i bonus attivi..."):
+with st.spinner("Scaricamento delle tue carte Limited con calcolo bonus reali..."):
     df = fetch_gallery_data(user_input)
 
 if df.empty:
@@ -408,9 +431,9 @@ with tab_builder:
                 already_chosen = [c["card_slug"] for c in selected_cards.values() if c is not None]
                 candidates = candidates[~candidates["card_slug"].isin(already_chosen)]
                 
-                # Etichetta con bonus livello reale + eventuale bonus In-Season
+                # Etichetta pulita ed esatta con il bonus reale (+13%)
                 options_dict = {
-                    f"{row['name']} ({row['club_name']}) - {'🟢' if row['is_in_season'] else '⚪'} (+{row['bonus_pct']}%) [Lvl {row['grade']}] - {row['position']} - L5: {row['l5_apps']}/5": row['card_slug']
+                    f"{row['name']} ({row['club_name']}) - {'🟢' if row['is_in_season'] else '⚪'} (+{row['bonus_pct']}%) - Ruolo: {row['position']} - L5: {row['l5_apps']}/5": row['card_slug']
                     for _, row in candidates.iterrows()
                 }
                 options_list = ["-- Vuoto --"] + list(options_dict.keys())
@@ -473,7 +496,7 @@ with tab_h2h:
     col1, col2 = st.columns(2)
     
     h2h_options = {
-        f"{row['name']} ({row['club_name']}) - {'🟢 In-S' if row['is_in_season'] else '⚪ Classic'} (+{row['bonus_pct']}%) [Lvl {row['grade']}] - {row['position']} - L5: {row['l5_apps']}/5 [id:{row['card_slug'][-6:]}]": row['card_slug']
+        f"{row['name']} ({row['club_name']}) - {'🟢 In-S' if row['is_in_season'] else '⚪ Classic'} (+{row['bonus_pct']}%) - {row['position']} - L5: {row['l5_apps']}/5 [id:{row['card_slug'][-6:]}]": row['card_slug']
         for _, row in df.iterrows()
     }
     
@@ -484,8 +507,9 @@ with tab_h2h:
             st.markdown(f"### {p1['name']}")
             st.caption(f"Squadra: **{p1['club_name']}** ({p1['league_name']})")
             st.write(f"• **Ruolo:** `{p1['position']}`")
-            st.write(f"• **Livello Carta:** Livello {p1['grade']} (+{float(p1['grade'])*0.5}%)")
-            st.write(f"• **Stagionalità:** {'🟢 In-Season (2026, +5%)' if p1['is_in_season'] else '⚪ Classic (+0%)'}")
+            st.write(f"• **Bonus Livello (XP):** +{p1['xp_bonus']}% (Livello {p1['grade']})")
+            st.write(f"• **Bonus Collezione Club:** +{p1['collection_bonus']}%")
+            st.write(f"• **Bonus Stagionale:** {'+5.0% (In-Season 2026)' if p1['is_in_season'] else '+0.0% (Classic)'}")
             st.write(f"• **Bonus Totale Carta:** **+{p1['bonus_pct']}%** (Moltiplicatore x{p1['multiplier']:.3f})")
             st.write(f"• **Titolarità L5:** {p1['starter_rate']}% ({p1['l5_apps']}/5 presenze)")
             
@@ -500,8 +524,9 @@ with tab_h2h:
             st.markdown(f"### {p2['name']}")
             st.caption(f"Squadra: **{p2['club_name']}** ({p2['league_name']})")
             st.write(f"• **Ruolo:** `{p2['position']}`")
-            st.write(f"• **Livello Carta:** Livello {p2['grade']} (+{float(p2['grade'])*0.5}%)")
-            st.write(f"• **Stagionalità:** {'🟢 In-Season (2026, +5%)' if p2['is_in_season'] else '⚪ Classic (+0%)'}")
+            st.write(f"• **Bonus Livello (XP):** +{p2['xp_bonus']}% (Livello {p2['grade']})")
+            st.write(f"• **Bonus Collezione Club:** +{p2['collection_bonus']}%")
+            st.write(f"• **Bonus Stagionale:** {'+5.0% (In-Season 2026)' if p2['is_in_season'] else '+0.0% (Classic)'}")
             st.write(f"• **Bonus Totale Carta:** **+{p2['bonus_pct']}%** (Moltiplicatore x{p2['multiplier']:.3f})")
             st.write(f"• **Titolarità L5:** {p2['starter_rate']}% ({p2['l5_apps']}/5 presenze)")
             
@@ -512,10 +537,12 @@ with tab_h2h:
 
 # --- TAB 3: ROSA GENERALE ---
 with tab_gallery:
-    st.subheader("📊 Rosa Ufficiale Limited con Livelli e Bonus")
-    display_df = df[["name", "club_name", "league_name", "position", "is_in_season", "grade", "bonus_pct", "multiplier", "floor_idx", "ceiling_idx", "card_slug"]].copy()
+    st.subheader("📊 Rosa Ufficiale Limited con Dettaglio Bonus")
+    display_df = df[["name", "club_name", "league_name", "position", "is_in_season", "grade", "xp_bonus", "collection_bonus", "bonus_pct", "multiplier", "floor_idx", "ceiling_idx", "card_slug"]].copy()
     display_df["is_in_season"] = display_df["is_in_season"].apply(lambda x: "🟢 In-Season (2026)" if x else "⚪ Classic")
     display_df["grade"] = display_df["grade"].apply(lambda x: f"Lvl {x}")
+    display_df["xp_bonus"] = display_df["xp_bonus"].apply(lambda x: f"+{x}%")
+    display_df["collection_bonus"] = display_df["collection_bonus"].apply(lambda x: f"+{x}%")
     display_df["bonus_pct"] = display_df["bonus_pct"].apply(lambda x: f"+{x}%")
     display_df["is_locked"] = display_df["card_slug"].apply(lambda x: "🔒 Schierato" if x in st.session_state["locked_cards"] else "🟢 Libero")
     
@@ -528,7 +555,9 @@ with tab_gallery:
             "position": "Ruolo",
             "is_in_season": "Stagionalità",
             "grade": "Livello XP",
-            "bonus_pct": "Bonus Totale (XP + IS)",
+            "xp_bonus": "Bonus XP (1%/lvl)",
+            "collection_bonus": "Bonus Collezione",
+            "bonus_pct": "Bonus Totale Carta",
             "multiplier": "Moltiplicatore",
             "floor_idx": "Floor Base",
             "ceiling_idx": "Ceiling Base",
