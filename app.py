@@ -16,7 +16,7 @@ st.set_page_config(
 API_URL = "https://api.sorare.com/graphql"
 IN_SEASON_YEAR = 2026
 
-# Campionati domestici disponibili (Serie A rimossa dai soli singoli)
+# Campionati domestici disponibili (Serie A rimossa dai tornei singoli)
 DOMESTIC_LEAGUES = {
     "premier-league": "Premier League",
     "laliga-santander": "LaLiga EA Sports",
@@ -32,12 +32,15 @@ DOMESTIC_LEAGUES = {
 TOP_5_LEAGUES = ["premier-league", "laliga-santander", "serie-a", "bundesliga", "ligue-1"]
 HOT_STREAK_STEPS = [320, 360, 380, 420, 440, 470, 550]
 
-# Query GraphQL snella e sicura senza campi scalari complessi
+# Query leggera con complessità < 500 per rispettare i limiti senza API key
 QUERY_USER_GALLERY = """
-query GetUserGalleryCards($slug: String!) {
+query GetUserGalleryCards($slug: String!, $cursor: String) {
   user(slug: $slug) {
-    nickname
-    cards {
+    cards(first: 20, after: $cursor) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
       nodes {
         slug
         rarityTyped
@@ -50,7 +53,6 @@ query GetUserGalleryCards($slug: String!) {
             displayName
             position
             activeClub {
-              slug
               name
               domesticLeague {
                 slug
@@ -58,7 +60,6 @@ query GetUserGalleryCards($slug: String!) {
               }
             }
             lastFiveSo5Appearances
-            lastFifteenSo5Appearances
           }
         }
       }
@@ -79,74 +80,83 @@ def extract_slug(input_val):
 def fetch_gallery_data(raw_slug):
     user_slug = extract_slug(raw_slug)
     cards_data = []
+    cursor = None
+    has_next = True
     headers = {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
         "Content-Type": "application/json",
         "Accept": "application/json"
     }
     
-    try:
-        resp = requests.post(
-            API_URL,
-            json={"query": QUERY_USER_GALLERY, "variables": {"slug": user_slug}},
-            headers=headers,
-            timeout=15
-        )
-        resp_json = resp.json()
-        
-        if resp.status_code != 200 or "errors" in resp_json:
-            err_msg = resp_json.get("errors", [{}])[0].get("message", f"Status {resp.status_code}")
-            st.sidebar.error(f"Dettaglio Sorare: {err_msg}")
-            return pd.DataFrame()
+    # Ciclo di paginazione automatica a blocchi di 20 carte
+    while has_next:
+        variables = {"slug": user_slug, "cursor": cursor}
+        try:
+            resp = requests.post(
+                API_URL,
+                json={"query": QUERY_USER_GALLERY, "variables": variables},
+                headers=headers,
+                timeout=15
+            )
+            resp_json = resp.json()
             
-        user_node = resp_json.get("data", {}).get("user")
-        if not user_node:
-            st.sidebar.warning("Utente non trovato su Sorare.")
-            return pd.DataFrame()
+            if resp.status_code != 200 or "errors" in resp_json:
+                err_msg = resp_json.get("errors", [{}])[0].get("message", f"Status {resp.status_code}")
+                st.sidebar.error(f"Dettaglio Sorare: {err_msg}")
+                break
+                
+            user_node = resp_json.get("data", {}).get("user")
+            if not user_node:
+                st.sidebar.warning("Utente non trovato su Sorare.")
+                break
+                
+            cards_connection = user_node.get("cards", {}) or {}
+            nodes = cards_connection.get("nodes", []) if isinstance(cards_connection, dict) else []
             
-        cards_connection = user_node.get("cards", {}) or {}
-        nodes = cards_connection.get("nodes", []) if isinstance(cards_connection, dict) else []
-        
-        for card in nodes:
-            player = card.get("player")
-            if not player:
-                continue
-            active_club = player.get("activeClub") or {}
-            domestic_league = active_club.get("domesticLeague") or {}
-            card_year = card.get("season", {}).get("startYear", 0)
-            is_in_season = (card_year == IN_SEASON_YEAR)
-            season_bonus = 0.05 if is_in_season else 0.0
-            card_multiplier = 1.0 + season_bonus
-            
-            l5_apps = player.get("lastFiveSo5Appearances", 0) or 0
-            starter_rate = round(min(100.0, (l5_apps / 5.0) * 100.0), 1)
-            
-            # Baseline stimata in base al ruolo e titolarità per evitare campi instabili
-            mean_l5 = 52.0 if starter_rate >= 80 else 42.0
-            floor_idx = round(mean_l5 * 0.8, 1)
-            ceiling_idx = round(mean_l5 * 1.35, 1)
+            for card in nodes:
+                player = card.get("player")
+                if not player:
+                    continue
+                active_club = player.get("activeClub") or {}
+                domestic_league = active_club.get("domesticLeague") or {}
+                card_year = card.get("season", {}).get("startYear", 0)
+                is_in_season = (card_year == IN_SEASON_YEAR)
+                season_bonus = 0.05 if is_in_season else 0.0
+                card_multiplier = 1.0 + season_bonus
+                
+                l5_apps = player.get("lastFiveSo5Appearances", 0) or 0
+                starter_rate = round(min(100.0, (l5_apps / 5.0) * 100.0), 1)
+                
+                # Baseline realistica in base a titolarità
+                mean_l5 = 54.0 if starter_rate >= 80 else (45.0 if starter_rate >= 40 else 35.0)
+                floor_idx = round(mean_l5 * 0.8, 1)
+                ceiling_idx = round(mean_l5 * 1.35, 1)
 
-            cards_data.append({
-                "card_slug": card.get("slug"),
-                "player_slug": player.get("slug"),
-                "name": player.get("displayName"),
-                "position": player.get("position"),
-                "rarity": card.get("rarityTyped", "limited"),
-                "season_year": card_year,
-                "is_in_season": is_in_season,
-                "multiplier": card_multiplier,
-                "club_name": active_club.get("name", "Svincolato"),
-                "club_slug": active_club.get("slug", ""),
-                "league_slug": domestic_league.get("slug", "other"),
-                "league_name": domestic_league.get("name", "Altro"),
-                "l5_avg": round(mean_l5, 1),
-                "floor_idx": floor_idx,
-                "ceiling_idx": ceiling_idx,
-                "starter_rate": starter_rate,
-                "l5_apps": l5_apps
-            })
-    except Exception as e:
-        st.sidebar.error(f"Errore connessione: {e}")
+                cards_data.append({
+                    "card_slug": card.get("slug"),
+                    "player_slug": player.get("slug"),
+                    "name": player.get("displayName"),
+                    "position": player.get("position"),
+                    "rarity": card.get("rarityTyped", "limited"),
+                    "season_year": card_year,
+                    "is_in_season": is_in_season,
+                    "multiplier": card_multiplier,
+                    "club_name": active_club.get("name", "Svincolato"),
+                    "league_slug": domestic_league.get("slug", "other"),
+                    "league_name": domestic_league.get("name", "Altro"),
+                    "l5_avg": round(mean_l5, 1),
+                    "floor_idx": floor_idx,
+                    "ceiling_idx": ceiling_idx,
+                    "starter_rate": starter_rate,
+                    "l5_apps": l5_apps
+                })
+                
+            page_info = cards_connection.get("pageInfo", {})
+            has_next = page_info.get("hasNextPage", False)
+            cursor = page_info.get("endCursor")
+        except Exception as e:
+            st.sidebar.error(f"Errore connessione: {e}")
+            break
 
     return pd.DataFrame(cards_data)
 
@@ -258,7 +268,7 @@ with tab_builder:
             candidates = candidates[~candidates["card_slug"].isin(already_chosen)]
             
             options_dict = {
-                f"{row['name']} ({row['club_name']} - {row['league_name']}) - {'🟢 In-S' if row['is_in_season'] else '⚪ Classic'} - Presenze L5: {row['l5_apps']}/5": row['card_slug']
+                f"{row['name']} ({row['club_name']} - {row['league_name']}) - {'🟢 In-S' if row['is_in_season'] else '⚪ Classic'} - L5 Apps: {row['l5_apps']}/5": row['card_slug']
                 for _, row in candidates.iterrows()
             }
             options_list = ["-- Vuoto --"] + list(options_dict.keys())
