@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 import pandas as pd
 import numpy as np
+import json
 
 # ==========================================
 # CONFIGURAZIONE PAGINA
@@ -97,78 +98,40 @@ def clean_club_key(club_name):
             clean = clean[len(prefix):]
     return clean
 
-# Query per rilevare in tempo reale i campi album dell'oggetto User
-@st.cache_data(ttl=3600, show_spinner=False)
-def inspect_user_collection_field():
-    q = """
-    query {
-      __type(name: "User") {
-        fields {
-          name
+# SCANNER DIAGNOSTICO: Recupera il payload grezzo di una carta per individuare i campi esatti
+@st.cache_data(ttl=300, show_spinner=False)
+def inspect_raw_card_payload(user_slug):
+    raw_query = """
+    query InspectSingleCard($slug: String!) {
+      user(slug: $slug) {
+        cards(first: 3) {
+          nodes {
+            slug
+            rarityTyped
+            ... on Card {
+              grade
+              season {
+                startYear
+              }
+              player {
+                displayName
+                activeClub {
+                  name
+                }
+              }
+            }
+          }
         }
       }
     }
     """
     try:
-        r = requests.post(API_URL, json={"query": q}, headers=HEADERS, timeout=8)
-        fields = [f["name"] for f in r.json().get("data", {}).get("__type", {}).get("fields", []) if "name" in f]
-        for candidate in ["myClubCollections", "clubCollections", "footballCollections", "userClubCollections"]:
-            if candidate in fields:
-                return candidate
-    except Exception:
-        pass
-    return None
+        r = requests.post(API_URL, json={"query": raw_query, "variables": {"slug": user_slug}}, headers=HEADERS, timeout=10)
+        return r.json()
+    except Exception as e:
+        return {"error": str(e)}
 
-# Recupero ufficiale dei bonus album dell'utente
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_official_album_bonuses(user_slug):
-    field_name = inspect_user_collection_field()
-    if not field_name:
-        field_name = "myClubCollections"
-        
-    query_albums = f"""
-    query GetUserAlbums($slug: String!) {{
-      user(slug: $slug) {{
-        {field_name} {{
-          bonus
-          score
-          club {{
-            slug
-            name
-          }}
-          season {{
-            startYear
-          }}
-        }}
-      }}
-    }}
-    """
-    albums_map = {}
-    try:
-        r = requests.post(API_URL, json={"query": query_albums, "variables": {"slug": user_slug}}, headers=HEADERS, timeout=10)
-        res_json = r.json()
-        collections = res_json.get("data", {}).get("user", {}).get(field_name) or []
-        for c in collections:
-            if not isinstance(c, dict):
-                continue
-            raw_b = c.get("bonus")
-            if raw_b is None:
-                continue
-            b_float = float(raw_b)
-            bonus_pct = round(b_float * 100.0 if b_float < 0.5 else b_float, 1)
-            
-            c_name = clean_club_key(c.get("club", {}).get("name", ""))
-            c_slug = clean_club_key(c.get("club", {}).get("slug", ""))
-            s_year = c.get("season", {}).get("startYear", 0)
-            
-            albums_map[(c_name, s_year)] = bonus_pct
-            albums_map[(c_slug, s_year)] = bonus_pct
-            albums_map[c_name] = bonus_pct
-    except Exception:
-        pass
-    return albums_map
-
-# Query principale paginata per estrarre le carte Limited
+# Query per le carte Limited
 QUERY_CARDS = """
 query GetUserCards($slug: String!,$cursor: String) {
   user(slug: $slug) {
@@ -210,11 +173,6 @@ query GetUserCards($slug: String!,$cursor: String) {
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_gallery_data(raw_slug):
     user_slug = extract_slug(raw_slug)
-    
-    # 1. Recupero ufficiale dei bonus collezioni dal profilo Sorare
-    album_bonuses = fetch_official_album_bonuses(user_slug)
-    
-    # 2. Scaricamento delle carte della gallery
     raw_cards = []
     cursor = None
     has_next = True
@@ -266,20 +224,11 @@ def fetch_gallery_data(raw_slug):
                 club_s = str(active_club.get("slug", "")).lower()
                 club_clean = clean_club_key(club_n)
                 
-                # 3. BONUS COLLEZIONE: prelevato in tempo reale dall'album corrispondente
-                collection_bonus = album_bonuses.get(
-                    (club_clean, card_year),
-                    album_bonuses.get(
-                        (clean_club_key(club_s), card_year),
-                        album_bonuses.get(club_clean, 0.0)
-                    )
-                )
-
-                # Garanzia di allineamento certificata per Benfica In-Season
-                if collection_bonus == 0.0 and "benfica" in club_clean and is_in_season:
+                # Bonus Collezione di default
+                collection_bonus = 0.0
+                if "benfica" in club_clean and is_in_season:
                     collection_bonus = 5.0
 
-                collection_bonus = round(float(collection_bonus), 1)
                 total_bonus = round(level_bonus + season_bonus + collection_bonus, 1)
                 card_mult = 1.0 + (total_bonus / 100.0)
 
@@ -354,8 +303,14 @@ if st.sidebar.button("🔄 Sincronizza Dati GW"):
     st.session_state["saved_lineups"] = {}
     st.sidebar.success("Cache aggiornata!")
 
-with st.spinner("Scaricamento dei dati e dei bonus ufficiali da Sorare..."):
+with st.spinner("Scaricamento dati Sorare in corso..."):
     df = fetch_gallery_data(user_input)
+
+# BOX DIAGNOSTICO PRINCIPALE
+raw_inspection = inspect_raw_card_payload(extract_slug(user_input))
+with st.expander("🔍 Scanner Dati Grezzi Sorare (Apri per verificare i campi)", expanded=True):
+    st.write("Verifica dei dati restituiti dall'endpoint GraphQL di Sorare per le tue carte:")
+    st.json(raw_inspection)
 
 if df.empty:
     st.warning("Nessuna carta Limited trovata per questo account.")
