@@ -13,7 +13,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-API_URL = "https://api.sorare.com/graphql"
+API_URL = "https://api.sorare.com/graphql/"
 IN_SEASON_YEAR = 2026
 
 DOMESTIC_LEAGUES = {
@@ -32,10 +32,12 @@ DOMESTIC_LEAGUES = {
 TOP_5_LEAGUES = ["premier-league", "laliga-santander", "serie-a", "bundesliga", "ligue-1"]
 HOT_STREAK_STEPS = [320, 360, 380, 420, 440, 470, 550]
 
+# Query standard compatibile con lo schema GraphQL pubblico di Sorare
 QUERY_GALLERY = """
-query GetUserGalleryDetailed($slug: String!,$cursor: String) {
+query GetUserFootballCards($slug: String!,$cursor: String) {
   user(slug: $slug) {
-    cards(first: 50, after: $cursor) {
+    nickname
+    paginatedCards(first: 50, after: $cursor) {
       pageInfo {
         hasNextPage
         endCursor
@@ -82,26 +84,35 @@ def fetch_gallery_data(raw_slug):
     cards_data = []
     cursor = None
     has_next = True
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; SorareLineupBuilder/1.0)"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Content-Type": "application/json"
+    }
     
     while has_next:
         variables = {"slug": user_slug, "cursor": cursor}
         try:
-            resp = requests.post(API_URL, json={"query": QUERY_GALLERY, "variables": variables}, headers=headers, timeout=12)
+            resp = requests.post(
+                API_URL,
+                json={"query": QUERY_GALLERY, "variables": variables},
+                headers=headers,
+                timeout=15
+            )
+            
             if resp.status_code != 200:
-                st.sidebar.error(f"Errore Sorare API (Status: {resp.status_code})")
+                st.sidebar.error(f"Dettaglio Errore Sorare API (Status: {resp.status_code}): {resp.text[:200]}")
                 break
             
             resp_json = resp.json()
             if "errors" in resp_json:
-                st.sidebar.error(f"Errore GraphQL: {resp_json['errors'][0].get('message', 'Non trovato')}")
+                st.sidebar.error(f"Errore Schema GraphQL: {resp_json['errors'][0].get('message', 'Errore')}")
                 break
                 
             user_node = resp_json.get("data", {}).get("user")
             if not user_node:
                 break
                 
-            data = user_node.get("cards", {})
+            data = user_node.get("paginatedCards", {})
             nodes = data.get("nodes", [])
             
             for card in nodes:
