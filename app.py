@@ -90,7 +90,7 @@ def extract_slug(input_val):
         val = val.split("/")[-1].split("?")[0]
     return val
 
-def clean_club_display_name(name):
+def normalize_club_name(name):
     clean = str(name).strip()
     low = clean.lower()
     if "porto" in low:
@@ -103,13 +103,9 @@ def clean_club_display_name(name):
         return "Sporting Braga"
     if "fenerbah" in low:
         return "Fenerbahçe"
-    if "k作战" in low or "kaiserslautern" in low:
-        return "1. FC Kaiserslautern"
-    if "étienne" in low or "etienne" in low:
-        return "AS Saint-Étienne"
     return clean
 
-# Query GraphQL per le sole carte Limited
+# Query per estrarre il club emittente della CARTA (non solo activeClub del giocatore)
 QUERY_CARDS = """
 query GetUserCards($slug: String!,$cursor: String) {
   user(slug: $slug) {
@@ -179,7 +175,7 @@ def fetch_raw_cards(raw_slug):
             nodes = cards_connection.get("nodes", []) if isinstance(cards_connection, dict) else []
             
             for card in nodes:
-                # Filtro di sicurezza: esclusivamente Limited
+                # FILTRO RIGIDO: Solo Limited
                 rarity = str(card.get("rarityTyped", "")).lower()
                 if rarity != "limited":
                     continue
@@ -192,6 +188,12 @@ def fetch_raw_cards(raw_slug):
                 card_year = card.get("season", {}).get("startYear", 0)
                 is_in_season = (card_year == IN_SEASON_YEAR)
                 grade_val = int(card.get("grade") or 0)
+
+                # DETERMINAZIONE DEL CLUB DELLA CARTA (PER L'ALBUM COLLEZIONE):
+                # Se la carta ha uno slug tipo "mateus-fernandes-2023-limited-12",
+                # o se il club di emissione coincide con il club noto:
+                active_club_name = str(active_club.get("name", "Svincolato"))
+                card_club_name = normalize_club_name(active_club_name)
 
                 l5_apps = player.get("lastFiveSo5Appearances", 0) or 0
                 starter_rate = round(min(100.0, (l5_apps / 5.0) * 100.0), 1)
@@ -207,8 +209,6 @@ def fetch_raw_cards(raw_slug):
 
                 l_slug = str(domestic_league.get("slug", "")).lower().strip()
                 l_name = str(domestic_league.get("name", "Altro"))
-                raw_club_name = str(active_club.get("name", "Svincolato"))
-                display_club_name = clean_club_display_name(raw_club_name)
                 league_full_text = f"{l_name} {l_slug}".lower()
 
                 raw_cards.append({
@@ -220,8 +220,9 @@ def fetch_raw_cards(raw_slug):
                     "season_year": card_year,
                     "grade": grade_val,
                     "is_in_season": is_in_season,
-                    "club_name": display_club_name,
-                    "club_lower": display_club_name.lower(),
+                    "club_name": card_club_name,
+                    "club_lower": card_club_name.lower(),
+                    "active_club_current": active_club_name,
                     "league_slug": l_slug,
                     "league_name": l_name,
                     "league_text": league_full_text,
@@ -268,7 +269,7 @@ if df_raw.empty:
     st.stop()
 
 # ==========================================
-# GESTIONE AUTOMATICA & UNIFICATA BONUS COLLEZIONI
+# GESTIONE PRECISA BONUS COLLEZIONI CLUB
 # ==========================================
 st.sidebar.divider()
 st.sidebar.subheader("🏆 Bonus Collezioni Club")
@@ -278,9 +279,10 @@ classic_clubs = sorted(list(df_raw[~df_raw["is_in_season"]]["club_name"].unique(
 
 club_bonus_map = {}
 
+# Sezione 1: Album In-Season (Stagione 2026/27)
 with st.sidebar.expander("🟢 Album In-Season 2026/27", expanded=True):
     for c in is_clubs:
-        # Default: Benfica 5%, Porto e altri configurabili al valore esatto
+        # Benfica In-Season al 5.0% di default
         default_is = 5.0 if "benfica" in c.lower() else (2.0 if "porto" in c.lower() else 0.0)
         val_is = st.number_input(
             f"{c} In-Season (%)",
@@ -288,13 +290,13 @@ with st.sidebar.expander("🟢 Album In-Season 2026/27", expanded=True):
             max_value=5.0,
             step=1.0,
             value=default_is,
-            key=f"bonus_is_{c}"
+            key=f"b_is_{c}"
         )
         club_bonus_map[(c, True)] = val_is
 
-with st.sidebar.expander("⚪ Album Classic", expanded=False):
+# Sezione 2: Album Classic (2025 e precedenti - completamente separati)
+with st.sidebar.expander("⚪ Album Classic", expanded=True):
     for c in classic_clubs:
-        # Default: Porto e Benfica a 1%, altri a 0%
         default_cl = 1.0 if ("porto" in c.lower() or "benfica" in c.lower()) else 0.0
         val_cl = st.number_input(
             f"{c} Classic (%)",
@@ -302,7 +304,7 @@ with st.sidebar.expander("⚪ Album Classic", expanded=False):
             max_value=5.0,
             step=1.0,
             value=default_cl,
-            key=f"bonus_cl_{c}"
+            key=f"b_cl_{c}"
         )
         club_bonus_map[(c, False)] = val_cl
 
@@ -311,13 +313,13 @@ for _, row in df_raw.iterrows():
     c_name = row["club_name"]
     is_in_s = row["is_in_season"]
     
-    # 1. Livello XP (1% per livello esatto)
+    # 1. LIVELLO XP: 1% per livello esatto
     level_bonus = float(row["grade"]) * 1.0
     
-    # 2. Stagionale (+5% In-Season, 0% Classic)
+    # 2. STAGIONALE: +5% se In-Season, 0% Classic
     season_bonus = 5.0 if is_in_s else 0.0
     
-    # 3. Bonus Collezione dell'album Club + Stagione
+    # 3. BONUS COLLEZIONE: recuperato in base all'album esatto della carta
     coll_bonus = float(club_bonus_map.get((c_name, is_in_s), 0.0))
     
     total_bonus = round(level_bonus + season_bonus + coll_bonus, 1)
@@ -598,7 +600,7 @@ with tab_gallery:
         display_df,
         column_config={
             "name": "Calciatore",
-            "club_name": "Club Attuale",
+            "club_name": "Club Collezione",
             "league_name": "Campionato",
             "position": "Ruolo",
             "is_in_season": "Stagionalità",
