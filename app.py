@@ -16,19 +16,28 @@ st.set_page_config(
 API_URL = "https://api.sorare.com/graphql"
 IN_SEASON_YEAR = 2026
 
-# Raggruppamenti ufficiali Sorare Pro
+# Campionati domestici disponibili (Serie A rimossa dai tornei singoli)
+DOMESTIC_LEAGUES = {
+    "premier-league": "Premier League",
+    "laliga-santander": "LaLiga EA Sports",
+    "bundesliga": "Bundesliga",
+    "ligue-1": "Ligue 1 McDonald's",
+    "eredivisie": "Eredivisie",
+    "liga-portugal": "Liga Portugal Betclic",
+    "jupiler-pro-league": "Jupiler Pro League",
+    "premiership": "Scottish Premiership (SPFL)",
+    "mls": "Major League Soccer (MLS)"
+}
+
 TOP_5_LEAGUES = ["premier-league", "laliga-santander", "serie-a", "bundesliga", "ligue-1"]
-CHALLENGER_LEAGUES = [
-    "eredivisie", "liga-portugal", "jupiler-pro-league",
-    "premiership", "super-lig", "austrian-bundesliga", "swiss-super-league"
-]
 HOT_STREAK_STEPS = [320, 360, 380, 420, 440, 470, 550]
 
-# Query ufficiale Sorare tramite il nodo paginato cards
-QUERY_USER_CARDS = """
-query GetUserCards($owner: String!) {
-  cards(owner: $owner, first: 50) {
-    nodes {
+# Query GraphQL ufficiale e stabile per galleria utente
+QUERY_USER_GALLERY = """
+query GetUserGalleryCards($slug: String!) {
+  user(slug: $slug) {
+    nickname
+    cards {
       slug
       rarity
       xpBonus
@@ -76,7 +85,7 @@ def fetch_gallery_data(raw_slug):
     try:
         resp = requests.post(
             API_URL,
-            json={"query": QUERY_USER_CARDS, "variables": {"owner": user_slug}},
+            json={"query": QUERY_USER_GALLERY, "variables": {"slug": user_slug}},
             headers=headers,
             timeout=15
         )
@@ -87,10 +96,13 @@ def fetch_gallery_data(raw_slug):
             st.sidebar.error(f"Dettaglio Sorare: {err_msg}")
             return pd.DataFrame()
             
-        cards_container = resp_json.get("data", {}).get("cards", {})
-        nodes = cards_container.get("nodes", []) if isinstance(cards_container, dict) else []
-        
-        for card in nodes:
+        user_node = resp_json.get("data", {}).get("user")
+        if not user_node:
+            st.sidebar.warning("Utente non trovato su Sorare.")
+            return pd.DataFrame()
+            
+        raw_cards = user_node.get("cards", []) or []
+        for card in raw_cards:
             player = card.get("player")
             if not player:
                 continue
@@ -162,7 +174,7 @@ with st.spinner("Scaricamento della tua galleria Sorare..."):
     df = fetch_gallery_data(user_input)
 
 if df.empty:
-    st.warning("Nessuna carta trovata per questo account o recupero in corso. Se il caricamento fallisce, controlla il messaggio di errore nella barra laterale.")
+    st.warning("Nessuna carta trovata per questo account o connessione in corso. Verifica lo username.")
     st.stop()
 
 st.sidebar.divider()
@@ -178,53 +190,54 @@ if game_mode.startswith("Pro"):
     )
 
 st.sidebar.divider()
-st.sidebar.subheader("Competizione Ufficiale")
+st.sidebar.subheader("Competizione Selezionata")
 
-# Tornei reali Sorare Pro (senza campionati singoli)
-selected_competition = st.sidebar.selectbox(
-    "Scegli Torneo Sorare",
-    [
-        "Champion Europe (Classic)",
-        "Champion Europe (In-Season)",
-        "Challenger Europe (Classic)",
-        "Challenger Europe (In-Season)",
-        "UEFA Champions League",
-        "All-Star (Tutti i campionati)",
-        "Tutte le Carte (Senza Filtri)"
-    ]
+comp_type = st.sidebar.selectbox(
+    "Categoria Torneo",
+    ["In-Season Domestico (SO5)", "In-Season Coppe Europee (SO5)", "Classic SO7", "Tutte le Carte (Libero)"]
 )
+
+selected_competition = ""
+if comp_type == "In-Season Domestico (SO5)":
+    selected_competition = st.sidebar.selectbox("Campionato Singolo", list(DOMESTIC_LEAGUES.values()))
+elif comp_type == "In-Season Coppe Europee (SO5)":
+    selected_competition = st.sidebar.selectbox("Coppa Europea", ["UEFA Champions League", "UEFA Europa & Conference League"])
+elif comp_type == "Classic SO7":
+    selected_competition = st.sidebar.selectbox("Torneo Classic", ["Champion Europe SO7", "All-Star SO7"])
+else:
+    selected_competition = "Tutta la Galleria"
 
 if st.sidebar.button("🗑️ Sblocca Formazioni"):
     st.session_state["locked_cards"] = set()
     st.session_state["saved_lineups"] = {}
     st.rerun()
 
-def filter_eligible_cards(data, comp_name, exclude_locked=True):
+def filter_eligible_cards(data, comp_cat, comp_name, exclude_locked=True):
     temp = data.copy()
     if exclude_locked:
         temp = temp[~temp["card_slug"].isin(st.session_state["locked_cards"])]
         
-    if comp_name == "Champion Europe (In-Season)":
-        temp = temp[(temp["league_slug"].isin(TOP_5_LEAGUES)) & (temp["is_in_season"])]
-    elif comp_name == "Champion Europe (Classic)":
-        temp = temp[temp["league_slug"].isin(TOP_5_LEAGUES)]
-    elif comp_name == "Challenger Europe (In-Season)":
-        temp = temp[(temp["league_slug"].isin(CHALLENGER_LEAGUES)) & (temp["is_in_season"])]
-    elif comp_name == "Challenger Europe (Classic)":
-        temp = temp[temp["league_slug"].isin(CHALLENGER_LEAGUES)]
-    elif comp_name in ["All-Star (Tutti i campionati)", "Tutte le Carte (Senza Filtri)"]:
-        pass
-        
+    if comp_cat == "In-Season Domestico (SO5)":
+        target_slug = [k for k, v in DOMESTIC_LEAGUES.items() if v == comp_name][0]
+        temp = temp[temp["league_slug"] == target_slug]
+    elif comp_cat == "Classic SO7":
+        temp = temp[~temp["is_in_season"]]
+        if comp_name == "Champion Europe SO7":
+            temp = temp[temp["league_slug"].isin(TOP_5_LEAGUES)]
     return temp
 
-eligible_df = filter_eligible_cards(df, selected_competition)
+eligible_df = filter_eligible_cards(df, comp_type, selected_competition)
 
 tab_builder, tab_h2h, tab_gallery = st.tabs(["🏆 Builder Formazione", "⚔️ Head-to-Head (1v1)", "📊 Rosa Completa"])
 
 # --- TAB 1: BUILDER ---
 with tab_builder:
     st.subheader(f"Composizione: {selected_competition}")
-    slots_needed = ["GK", "DEF", "MID", "FWD", "EXTRA"]
+    
+    is_so7 = (comp_type == "Classic SO7")
+    slots_needed = ["GK", "DEF", "MID", "FWD", "EXTRA"] if not is_so7 else ["GK", "DEF 1", "DEF 2", "MID 1", "MID 2", "FWD", "EXTRA"]
+    
+    st.caption(f"Formato: {'SO7 (7 Titolari Classic)' if is_so7 else 'SO5 (Min 4 In-Season + Max 1 Classic)'}")
     
     col_layout, col_stats = st.columns([3, 2])
     
@@ -246,7 +259,7 @@ with tab_builder:
             candidates = candidates[~candidates["card_slug"].isin(already_chosen)]
             
             options_dict = {
-                f"{row['name']} ({row['club_name']}) - {'🟢 In-Season' if row['is_in_season'] else '⚪ Classic'} - L5: {row['l5_avg']}": row['card_slug']
+                f"{row['name']} ({row['club_name']} - {row['league_name']}) - {'🟢 In-S' if row['is_in_season'] else '⚪ Classic'} - L5: {row['l5_avg']}": row['card_slug']
                 for _, row in candidates.iterrows()
             }
             options_list = ["-- Vuoto --"] + list(options_dict.keys())
@@ -264,7 +277,7 @@ with tab_builder:
         active_lineup = [c for c in selected_cards.values() if c is not None]
         
         if len(active_lineup) == len(slots_needed):
-            if "In-Season" in selected_competition:
+            if not is_so7 and comp_type != "Tutte le Carte (Libero)":
                 in_season_count = sum(1 for c in active_lineup if c["is_in_season"])
                 if in_season_count < 4:
                     st.error(f"⚠️ Servono almeno 4 carte In-Season! (Attuali: {in_season_count})")
@@ -306,7 +319,7 @@ with tab_h2h:
     st.subheader("⚔️ Confronto Diretto Ballottaggi")
     col1, col2 = st.columns(2)
     
-    card_list = {f"{row['name']} ({row['club_name']}) - {row['rarity']}": row['card_slug'] for _, row in df.iterrows()}
+    card_list = {f"{row['name']} ({row['club_name']} - {row['league_name']})": row['card_slug'] for _, row in df.iterrows()}
     
     if card_list:
         with col1:
@@ -319,6 +332,7 @@ with tab_h2h:
             st.write(f"• **Titolarità L5:** {p1['starter_rate']}%")
             st.metric("Floor Index", f"{p1['floor_idx']} pt")
             st.metric("Ceiling Index", f"{p1['ceiling_idx']} pt")
+            st.write(f"Ultime 5 partite: `{p1['l5_scores']}`")
 
         with col2:
             c2_key = st.selectbox("Seleziona Carta B", list(card_list.keys()), index=min(1, len(card_list)-1))
@@ -330,6 +344,7 @@ with tab_h2h:
             st.write(f"• **Titolarità L5:** {p2['starter_rate']}%")
             st.metric("Floor Index", f"{p2['floor_idx']} pt")
             st.metric("Ceiling Index", f"{p2['ceiling_idx']} pt")
+            st.write(f"Ultime 5 partite: `{p2['l5_scores']}`")
 
 # --- TAB 3: ROSA GENERALE ---
 with tab_gallery:
@@ -342,7 +357,7 @@ with tab_gallery:
         display_df,
         column_config={
             "name": "Calciatore",
-            "club_name": "Club Attuale (Opta)",
+            "club_name": "Club Attuale",
             "league_name": "Campionato",
             "position": "Ruolo",
             "is_in_season": "Stagionalità",
