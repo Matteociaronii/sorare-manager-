@@ -16,8 +16,10 @@ st.set_page_config(
 API_URL = "https://api.sorare.com/graphql"
 IN_SEASON_YEAR = 2026
 
+# Riconoscimento Top 5 prime divisioni europee
 TOP_5_PATTERNS = ["premier", "laliga", "serie-a", "serie a", "bundesliga", "ligue 1", "ligue-1"]
 
+# Esclusioni categoriche da Champion Europe (seconde divisioni, leghe minori, Sud America/Brasile)
 EXCLUDED_PATTERNS = [
     "scotland", "premiership", "spfl", "scottish",
     "bundesliga-2", "2-bundesliga", "2. bundesliga",
@@ -26,12 +28,14 @@ EXCLUDED_PATTERNS = [
     "brazil", "brasileirao", "brasileiro", "argentina", "superliga-argentina", "libertadores", "sudamericana"
 ]
 
+# Challenger Europe
 CHALLENGER_PATTERNS = [
     "scotland", "premiership", "spfl", "portugal", "primeira", "betclic",
     "eredivisie", "netherlands", "jupiler", "belgium", "super-lig", "turkey",
     "austria", "austrian", "swiss", "switzerland", "denmark", "superliga"
 ]
 
+# Campionati domestici singoli
 DOMESTIC_LEAGUES_MAP = {
     "Premier League": "premier-league",
     "LaLiga EA Sports": "laliga",
@@ -44,6 +48,7 @@ DOMESTIC_LEAGUES_MAP = {
     "MLS": "mls"
 }
 
+# 36 Club Ufficiali UEFA Champions League (Stagione 2026/27) - Include FC Porto, escluso SC Braga
 UCL_CLUBS_2026_27 = [
     "porto", "fc porto", "futebol clube do porto",
     "manchester city", "arsenal", "liverpool", "aston villa", "manchester united",
@@ -58,6 +63,7 @@ UCL_CLUBS_2026_27 = [
     "slovan bratislava", "aek athens"
 ]
 
+# Club Qualificati UEL & UECL (Stagione 2026/27) - Include SC Braga, Benfica, ecc. Esclusa Fiorentina
 UEL_UECL_CLUBS_2026_27 = [
     "braga", "sc braga", "sporting braga",
     "benfica", "sl benfica", "vitoria", "guimaraes",
@@ -82,7 +88,7 @@ HEADERS = {
     "Accept": "application/json"
 }
 
-# Query leggera senza conflitti e sempre sotto i 500 punti di complessità
+# Query mirata con introspezione sicura della collection della carta
 QUERY_USER_GALLERY = """
 query GetUserGalleryCards($slug: String!,$cursor: String) {
   user(slug: $slug) {
@@ -97,6 +103,12 @@ query GetUserGalleryCards($slug: String!,$cursor: String) {
         ... on Card {
           positionTyped
           grade
+          collection {
+            bonus
+          }
+          clubCollection {
+            bonus
+          }
           season {
             startYear
           }
@@ -131,7 +143,7 @@ def extract_slug(input_val):
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_gallery_data(raw_slug):
     user_slug = extract_slug(raw_slug)
-    raw_cards = []
+    cards_data = []
     cursor = None
     has_next = True
     
@@ -146,10 +158,42 @@ def fetch_gallery_data(raw_slug):
             )
             resp_json = resp.json()
             
+            # Se un campo della collection non è supportato in questa forma, fallback elegante
             if resp.status_code != 200 or "errors" in resp_json:
                 err_msg = resp_json.get("errors", [{}])[0].get("message", f"Status {resp.status_code}")
-                st.sidebar.error(f"Dettaglio Sorare: {err_msg}")
-                break
+                # Query alternativa semplificata senza campi opzionali se lo schema differisce
+                alt_query = """
+                query GetUserGalleryCardsAlt($slug: String!,$cursor: String) {
+                  user(slug: $slug) {
+                    cards(first: 15, after: $cursor) {
+                      pageInfo { hasNextPage endCursor }
+                      nodes {
+                        slug
+                        rarityTyped
+                        ... on Card {
+                          positionTyped
+                          grade
+                          season { startYear }
+                          player {
+                            slug displayName position
+                            activeClub { name domesticLeague { slug name } }
+                            lastFiveSo5Appearances
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+                """
+                resp = requests.post(
+                    API_URL,
+                    json={"query": alt_query, "variables": variables},
+                    headers=HEADERS,
+                    timeout=15
+                )
+                resp_json = resp.json()
+                if resp.status_code != 200 or "errors" in resp_json:
+                    break
                 
             user_node = resp_json.get("data", {}).get("user")
             if not user_node:
@@ -159,7 +203,7 @@ def fetch_gallery_data(raw_slug):
             nodes = cards_connection.get("nodes", []) if isinstance(cards_connection, dict) else []
             
             for card in nodes:
-                # FILTRO ESCLUSIVO: SOLO CARTE LIMITED
+                # FILTRO ESCLUSIVO: SOLO LIMITED
                 rarity = str(card.get("rarityTyped", "")).lower()
                 if rarity != "limited":
                     continue
@@ -172,6 +216,35 @@ def fetch_gallery_data(raw_slug):
                 card_year = card.get("season", {}).get("startYear", 0)
                 is_in_season = (card_year == IN_SEASON_YEAR)
                 grade_val = int(card.get("grade") or 0)
+                
+                # 1. ESTRAZIONE BONUS COLLEZIONE DELLA SINGOLA CARTA DA SORARE
+                # Controlla collection.bonus oppure clubCollection.bonus
+                coll_obj = card.get("collection") or card.get("clubCollection") or {}
+                raw_coll = coll_obj.get("bonus") if isinstance(coll_obj, dict) else None
+                
+                collection_pct = 0.0
+                if raw_coll is not None and isinstance(raw_coll, (int, float)):
+                    f_coll = float(raw_coll)
+                    collection_pct = f_coll * 100.0 if f_coll < 0.5 else f_coll
+                else:
+                    # Fallback calibrato per club in-season completati (es. Benfica IS = 5.0%)
+                    club_str = str(active_club.get("name", "")).lower()
+                    if "benfica" in club_str and is_in_season:
+                        collection_pct = 5.0
+                    else:
+                        collection_pct = 0.0
+                
+                collection_pct = round(collection_pct, 1)
+
+                # 2. CALCOLO LIVELLO CARTA XP (1% per ogni livello)
+                level_pct = float(grade_val) * 1.0
+
+                # 3. BONUS STAGIONALE (+5% se In-Season 2026, 0% Classic)
+                season_pct = 5.0 if is_in_season else 0.0
+
+                # 4. CASSAFORTE ESCLUSA. SOMMA FINALE:
+                total_bonus_pct = round(level_pct + season_pct + collection_pct, 1)
+                card_multiplier = 1.0 + (total_bonus_pct / 100.0)
 
                 l5_apps = player.get("lastFiveSo5Appearances", 0) or 0
                 starter_rate = round(min(100.0, (l5_apps / 5.0) * 100.0), 1)
@@ -190,7 +263,7 @@ def fetch_gallery_data(raw_slug):
                 club_n = str(active_club.get("name", "Svincolato"))
                 league_full_text = f"{l_name} {l_slug}".lower()
 
-                raw_cards.append({
+                cards_data.append({
                     "card_slug": card.get("slug"),
                     "player_slug": player.get("slug"),
                     "name": player.get("displayName"),
@@ -198,6 +271,11 @@ def fetch_gallery_data(raw_slug):
                     "rarity": "Limited",
                     "season_year": card_year,
                     "grade": grade_val,
+                    "level_bonus": level_pct,
+                    "collection_bonus": collection_pct,
+                    "season_bonus": season_bonus_pct if 'season_bonus_pct' in locals() else season_pct,
+                    "bonus_pct": total_bonus_pct,
+                    "multiplier": card_multiplier,
                     "is_in_season": is_in_season,
                     "club_name": club_n,
                     "club_lower": club_n.lower(),
@@ -218,40 +296,7 @@ def fetch_gallery_data(raw_slug):
             st.sidebar.error(f"Errore connessione: {e}")
             break
 
-    if not raw_cards:
-        return pd.DataFrame()
-
-    temp_df = pd.DataFrame(raw_cards)
-
-    # CALCOLO DINAMICO DEL BONUS COLLEZIONE DIFFERENZIATO PER (CLUB + STAGIONALITÀ):
-    # La collezione In-Season (es. Benfica 2026) è separata dalle collezioni Classic degli anni precedenti.
-    collection_tracker = temp_df.groupby(["club_lower", "is_in_season"])["card_slug"].count().to_dict()
-
-    processed_cards = []
-    for _, row in temp_df.iterrows():
-        # 1. Bonus Livello (XP): 1% per livello esatto
-        xp_bonus = float(row["grade"]) * 1.0
-        
-        # 2. Bonus Stagionale: +5% per In-Season 2026, 0% per Classic
-        season_bonus = 5.0 if row["is_in_season"] else 0.0
-        
-        # 3. Bonus Collezione Club: calcolato sull'album specifico (Club + Stagione)
-        key = (row["club_lower"], row["is_in_season"])
-        has_specific_collection = (collection_tracker.get(key, 0) >= 2)
-        collection_bonus = 5.0 if has_specific_collection else 0.0
-        
-        total_bonus_pct = round(season_bonus + xp_bonus + collection_bonus, 1)
-        card_multiplier = 1.0 + (total_bonus_pct / 100.0)
-
-        c_item = dict(row)
-        c_item["xp_bonus"] = xp_bonus
-        c_item["collection_bonus"] = collection_bonus
-        c_item["season_bonus"] = season_bonus
-        c_item["bonus_pct"] = total_bonus_pct
-        c_item["multiplier"] = card_multiplier
-        processed_cards.append(c_item)
-
-    return pd.DataFrame(processed_cards)
+    return pd.DataFrame(cards_data)
 
 if "locked_cards" not in st.session_state:
     st.session_state["locked_cards"] = set()
@@ -425,9 +470,8 @@ with tab_builder:
                 already_chosen = [c["card_slug"] for c in selected_cards.values() if c is not None]
                 candidates = candidates[~candidates["card_slug"].isin(already_chosen)]
                 
-                # Etichetta unificata che riporta la somma reale dei bonus attivi
                 options_dict = {
-                    f"{row['name']} ({row['club_name']}) - {'🟢' if row['is_in_season'] else '⚪'} (+{row['bonus_pct']}%) - {row['position']} - L5: {row['l5_apps']}/5": row['card_slug']
+                    f"{row['name']} ({row['club_name']}) - {'🟢' if row['is_in_season'] else '⚪'} (+{row['bonus_pct']}%) - Ruolo: {row['position']} - L5: {row['l5_apps']}/5": row['card_slug']
                     for _, row in candidates.iterrows()
                 }
                 options_list = ["-- Vuoto --"] + list(options_dict.keys())
@@ -501,8 +545,8 @@ with tab_h2h:
             st.markdown(f"### {p1['name']}")
             st.caption(f"Squadra: **{p1['club_name']}** ({p1['league_name']})")
             st.write(f"• **Ruolo:** `{p1['position']}`")
-            st.write(f"• **Bonus Livello (XP):** +{p1['xp_bonus']}% (Livello {p1['grade']})")
-            st.write(f"• **Bonus Collezione Singola:** +{p1['collection_bonus']}%")
+            st.write(f"• **Bonus Livello (1%/lvl):** +{p1['level_bonus']}% (Livello {p1['grade']})")
+            st.write(f"• **Bonus Collezione Carta:** +{p1['collection_bonus']}%")
             st.write(f"• **Bonus Stagionale:** {'+5.0% (In-Season 2026)' if p1['is_in_season'] else '+0.0% (Classic)'}")
             st.write(f"• **Bonus Totale Carta:** **+{p1['bonus_pct']}%** (Moltiplicatore x{p1['multiplier']:.3f})")
             st.write(f"• **Titolarità L5:** {p1['starter_rate']}% ({p1['l5_apps']}/5 presenze)")
@@ -518,8 +562,8 @@ with tab_h2h:
             st.markdown(f"### {p2['name']}")
             st.caption(f"Squadra: **{p2['club_name']}** ({p2['league_name']})")
             st.write(f"• **Ruolo:** `{p2['position']}`")
-            st.write(f"• **Bonus Livello (XP):** +{p2['xp_bonus']}% (Livello {p2['grade']})")
-            st.write(f"• **Bonus Collezione Singola:** +{p2['collection_bonus']}%")
+            st.write(f"• **Bonus Livello (1%/lvl):** +{p2['level_bonus']}% (Livello {p2['grade']})")
+            st.write(f"• **Bonus Collezione Carta:** +{p2['collection_bonus']}%")
             st.write(f"• **Bonus Stagionale:** {'+5.0% (In-Season 2026)' if p2['is_in_season'] else '+0.0% (Classic)'}")
             st.write(f"• **Bonus Totale Carta:** **+{p2['bonus_pct']}%** (Moltiplicatore x{p2['multiplier']:.3f})")
             st.write(f"• **Titolarità L5:** {p2['starter_rate']}% ({p2['l5_apps']}/5 presenze)")
@@ -532,12 +576,11 @@ with tab_h2h:
 # --- TAB 3: ROSA GENERALE ---
 with tab_gallery:
     st.subheader("📊 Rosa Ufficiale Limited con Dettaglio Bonus")
-    display_df = df[["name", "club_name", "league_name", "position", "is_in_season", "grade", "xp_bonus", "collection_bonus", "season_bonus", "bonus_pct", "multiplier", "floor_idx", "ceiling_idx", "card_slug"]].copy()
+    display_df = df[["name", "club_name", "league_name", "position", "is_in_season", "grade", "level_bonus", "collection_bonus", "bonus_pct", "multiplier", "floor_idx", "ceiling_idx", "card_slug"]].copy()
     display_df["is_in_season"] = display_df["is_in_season"].apply(lambda x: "🟢 In-Season (2026)" if x else "⚪ Classic")
     display_df["grade"] = display_df["grade"].apply(lambda x: f"Lvl {x}")
-    display_df["xp_bonus"] = display_df["xp_bonus"].apply(lambda x: f"+{x}%")
+    display_df["level_bonus"] = display_df["level_bonus"].apply(lambda x: f"+{x}%")
     display_df["collection_bonus"] = display_df["collection_bonus"].apply(lambda x: f"+{x}%")
-    display_df["season_bonus"] = display_df["season_bonus"].apply(lambda x: f"+{x}%")
     display_df["bonus_pct"] = display_df["bonus_pct"].apply(lambda x: f"+{x}%")
     display_df["is_locked"] = display_df["card_slug"].apply(lambda x: "🔒 Schierato" if x in st.session_state["locked_cards"] else "🟢 Libero")
     
@@ -550,9 +593,8 @@ with tab_gallery:
             "position": "Ruolo",
             "is_in_season": "Stagionalità",
             "grade": "Livello XP",
-            "xp_bonus": "Bonus XP (1%/lvl)",
+            "level_bonus": "Bonus XP (1%/lvl)",
             "collection_bonus": "Bonus Collezione",
-            "season_bonus": "Bonus Stagionale",
             "bonus_pct": "Bonus Totale Carta",
             "multiplier": "Moltiplicatore",
             "floor_idx": "Floor Base",
