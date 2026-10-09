@@ -32,7 +32,7 @@ DOMESTIC_LEAGUES = {
 TOP_5_LEAGUES = ["premier-league", "laliga-santander", "serie-a", "bundesliga", "ligue-1"]
 HOT_STREAK_STEPS = [320, 360, 380, 420, 440, 470, 550]
 
-# Query GraphQL corretta e compatibile con lo schema Card di Sorare
+# Query GraphQL corretta con lastFiveSo5Appearances e lastFifteenSo5Appearances
 QUERY_USER_GALLERY = """
 query GetUserGalleryCards($slug: String!) {
   user(slug: $slug) {
@@ -57,8 +57,12 @@ query GetUserGalleryCards($slug: String!) {
                 name
               }
             }
-            lastFiveSo5Scores
-            lastFifteenSo5Scores
+            lastFiveSo5Appearances {
+              score
+            }
+            lastFifteenSo5Appearances {
+              score
+            }
           }
         }
       }
@@ -118,8 +122,13 @@ def fetch_gallery_data(raw_slug):
             season_bonus = 0.05 if is_in_season else 0.0
             card_multiplier = 1.0 + season_bonus
             
-            l5 = [x for x in (player.get("lastFiveSo5Scores") or []) if x is not None]
-            l15 = [x for x in (player.get("lastFifteenSo5Scores") or []) if x is not None]
+            # Estrazione score da lastFiveSo5Appearances e lastFifteenSo5Appearances
+            l5_apps = player.get("lastFiveSo5Appearances") or []
+            l15_apps = player.get("lastFifteenSo5Appearances") or []
+            
+            l5 = [item.get("score") for item in l5_apps if item and item.get("score") is not None]
+            l15 = [item.get("score") for item in l15_apps if item and item.get("score") is not None]
+            
             if not l5:
                 l5 = [35.0]
             if not l15:
