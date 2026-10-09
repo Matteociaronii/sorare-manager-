@@ -2,7 +2,6 @@ import streamlit as st
 import requests
 import pandas as pd
 import numpy as np
-import json
 
 # ==========================================
 # CONFIGURAZIONE PAGINA
@@ -98,44 +97,44 @@ def clean_club_key(club_name):
             clean = clean[len(prefix):]
     return clean
 
-# SCANNER DIAGNOSTICO: Recupera il payload grezzo di una carta per individuare i campi esatti
-@st.cache_data(ttl=300, show_spinner=False)
-def inspect_raw_card_payload(user_slug):
-    raw_query = """
-    query InspectSingleCard($slug: String!) {
-      user(slug: $slug) {
-        cards(first: 3) {
-          nodes {
-            slug
-            rarityTyped
-            ... on Card {
-              grade
-              season {
-                startYear
-              }
-              player {
-                displayName
-                activeClub {
-                  name
-                }
-              }
-            }
-          }
+# ==============================================================
+# INTROSPEZIONE AUTOMATICA DEI CAMPI DI SORARE
+# ==============================================================
+@st.cache_data(ttl=3600, show_spinner=False)
+def inspect_sorare_fields():
+    introspection_query = """
+    query IntrospectCardAndUser {
+      cardType: __type(name: "Card") {
+        fields {
+          name
+        }
+      }
+      userType: __type(name: "User") {
+        fields {
+          name
         }
       }
     }
     """
     try:
-        r = requests.post(API_URL, json={"query": raw_query, "variables": {"slug": user_slug}}, headers=HEADERS, timeout=10)
-        return r.json()
+        r = requests.post(API_URL, json={"query": introspection_query}, headers=HEADERS, timeout=8)
+        data = r.json().get("data", {})
+        card_fields = [f["name"] for f in data.get("cardType", {}).get("fields", [])]
+        user_fields = [f["name"] for f in data.get("userType", {}).get("fields", [])]
+        return {
+            "card_fields_bonus": [f for f in card_fields if any(k in f.lower() for k in ["bonus", "score", "multiplier", "coll", "power", "album"])],
+            "user_fields_coll": [f for f in user_fields if any(k in f.lower() for k in ["coll", "album", "club"])],
+            "all_card_fields_count": len(card_fields),
+            "all_user_fields_count": len(user_fields)
+        }
     except Exception as e:
         return {"error": str(e)}
 
-# Query per le carte Limited
+# Query per le sole carte LIMITED (paginata con filtro rigido nel codice)
 QUERY_CARDS = """
 query GetUserCards($slug: String!,$cursor: String) {
   user(slug: $slug) {
-    cards(first: 15, after: $cursor) {
+    cards(first: 20, after: $cursor) {
       pageInfo {
         hasNextPage
         endCursor
@@ -201,6 +200,7 @@ def fetch_gallery_data(raw_slug):
             nodes = cards_connection.get("nodes", []) if isinstance(cards_connection, dict) else []
             
             for card in nodes:
+                # FILTRO RIGIDO: Solo Limited, ignora totalmente Common, Rare, ecc.
                 rarity = str(card.get("rarityTyped", "")).lower()
                 if rarity != "limited":
                     continue
@@ -214,7 +214,7 @@ def fetch_gallery_data(raw_slug):
                 is_in_season = (card_year == IN_SEASON_YEAR)
                 grade_val = int(card.get("grade") or 0)
 
-                # 1. LIVELLO XP: 1% per livello esatto della carta
+                # 1. LIVELLO XP: 1% per livello esatto
                 level_bonus = float(grade_val) * 1.0
 
                 # 2. STAGIONALE: +5% se In-Season (2026), 0% Classic
@@ -223,11 +223,9 @@ def fetch_gallery_data(raw_slug):
                 club_n = str(active_club.get("name", "Svincolato"))
                 club_s = str(active_club.get("slug", "")).lower()
                 club_clean = clean_club_key(club_n)
-                
-                # Bonus Collezione di default
-                collection_bonus = 0.0
-                if "benfica" in club_clean and is_in_season:
-                    collection_bonus = 5.0
+
+                # Bonus collezione di base: Benfica In-Season attivo al +5%
+                collection_bonus = 5.0 if ("benfica" in club_clean and is_in_season) else 0.0
 
                 total_bonus = round(level_bonus + season_bonus + collection_bonus, 1)
                 card_mult = 1.0 + (total_bonus / 100.0)
@@ -303,14 +301,16 @@ if st.sidebar.button("🔄 Sincronizza Dati GW"):
     st.session_state["saved_lineups"] = {}
     st.sidebar.success("Cache aggiornata!")
 
-with st.spinner("Scaricamento dati Sorare in corso..."):
+with st.spinner("Scaricamento delle sole carte Limited da Sorare..."):
     df = fetch_gallery_data(user_input)
 
-# BOX DIAGNOSTICO PRINCIPALE
-raw_inspection = inspect_raw_card_payload(extract_slug(user_input))
-with st.expander("🔍 Scanner Dati Grezzi Sorare (Apri per verificare i campi)", expanded=True):
-    st.write("Verifica dei dati restituiti dall'endpoint GraphQL di Sorare per le tue carte:")
-    st.json(raw_inspection)
+# BOX DI INTROSPEZIONE DELLO SCHEMA REALE DI SORARE
+detected_schema = inspect_sorare_fields()
+with st.expander("🔍 Campi Riconosciuti da Sorare (Schema Ufficiale)", expanded=True):
+    st.write("**Campi rilevati su Card (inerenti a bonus/moltiplicatori):**")
+    st.code(detected_schema.get("card_fields_bonus", []))
+    st.write("**Campi rilevati su User (inerenti a collezioni/album):**")
+    st.code(detected_schema.get("user_fields_coll", []))
 
 if df.empty:
     st.warning("Nessuna carta Limited trovata per questo account.")
@@ -567,7 +567,7 @@ with tab_h2h:
 
 # --- TAB 3: ROSA GENERALE ---
 with tab_gallery:
-    st.subheader("📊 Rosa Ufficiale Limited con Dati Diretti Sorare")
+    st.subheader("📊 Rosa Ufficiale Limited (Solo Carte Limited)")
     display_df = df[["name", "club_name", "league_name", "position", "is_in_season", "grade", "level_bonus", "collection_bonus", "season_bonus", "bonus_pct", "multiplier", "floor_idx", "ceiling_idx", "card_slug"]].copy()
     display_df["is_in_season"] = display_df["is_in_season"].apply(lambda x: "🟢 In-Season (2026)" if x else "⚪ Classic")
     display_df["grade"] = display_df["grade"].apply(lambda x: f"Lvl {x}")
@@ -587,7 +587,7 @@ with tab_gallery:
             "is_in_season": "Stagionalità",
             "grade": "Livello XP",
             "level_bonus": "Bonus XP (1%/lvl)",
-            "collection_bonus": "Bonus Collezione Ufficiale",
+            "collection_bonus": "Bonus Collezione",
             "season_bonus": "Bonus Stagionale",
             "bonus_pct": "Bonus Totale Carta",
             "multiplier": "Moltiplicatore",
