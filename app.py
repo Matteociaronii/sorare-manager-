@@ -48,7 +48,7 @@ DOMESTIC_LEAGUES_MAP = {
     "MLS": "mls"
 }
 
-# 36 Club Ufficiali UEFA Champions League (Stagione 2026/27) - Include FC Porto
+# 36 Club Ufficiali UEFA Champions League (Stagione 2026/27) - Include FC Porto, escluso SC Braga
 UCL_CLUBS_2026_27 = [
     "porto", "fc porto", "futebol clube do porto",
     "manchester city", "arsenal", "liverpool", "aston villa", "manchester united",
@@ -63,13 +63,13 @@ UCL_CLUBS_2026_27 = [
     "slovan bratislava", "aek athens"
 ]
 
-# Club Qualificati UEL & UECL (Stagione 2026/27) - Include SC Braga, Benfica, ecc.
+# Club Qualificati UEL & UECL (Stagione 2026/27) - Include SC Braga, Benfica, ecc. Esclusa Fiorentina
 UEL_UECL_CLUBS_2026_27 = [
     "braga", "sc braga", "sporting braga",
     "benfica", "sl benfica", "vitoria", "guimaraes",
     "milan", "ac milan", "juventus", "lazio", "atalanta", "bologna",
     "tottenham", "chelsea", "newcastle",
-    "real sociedad", "athletic club", "celta vigo",
+    "real書籍", "real sociedad", "athletic club", "celta vigo",
     "bayer leverkusen", "leverkusen", "frankfurt", "hoffenheim", "heidenheim",
     "marseille", "lyon", "olympique lyonnais", "nice", "monaco", "brest",
     "ajax", "az alkmaar", "alkmaar", "twente", "utrecht",
@@ -82,7 +82,7 @@ UEL_UECL_CLUBS_2026_27 = [
 
 HOT_STREAK_STEPS = [320, 360, 380, 420, 440, 470, 550]
 
-# Query GraphQL snella e sicura che preleva anche il power/bonus totale della carta
+# Query GraphQL: estrazione del bonus totale ufficiale e dei livelli da Sorare
 QUERY_USER_GALLERY = """
 query GetUserGalleryCards($slug: String!,$cursor: String) {
   user(slug: $slug) {
@@ -96,7 +96,8 @@ query GetUserGalleryCards($slug: String!,$cursor: String) {
         rarityTyped
         ... on Card {
           positionTyped
-          power
+          bonus
+          grade
           season {
             startYear
           }
@@ -177,18 +178,22 @@ def fetch_gallery_data(raw_slug):
                 card_year = card.get("season", {}).get("startYear", 0)
                 is_in_season = (card_year == IN_SEASON_YEAR)
                 
-                # CALCOLO BONUS EFFETTIVO DELLA CARTA (Livello + Collezione + In-Season)
-                # Sorare restituisce 'power' (es. 1.085 per +8.5%, oppure un valore decimale diretto)
-                raw_power = card.get("power")
-                if raw_power is not None and isinstance(raw_power, (int, float)):
-                    if raw_power > 2.0:
-                        card_multiplier = 1.0 + (raw_power / 100.0)
-                    elif raw_power >= 1.0:
-                        card_multiplier = float(raw_power)
+                # ESTRAZIONE BONUS TOTALE UFFICIALE SORARE (Livello + Collezione + In-Season)
+                raw_bonus = card.get("bonus")
+                grade = card.get("grade")
+                
+                if raw_bonus is not None and isinstance(raw_bonus, (int, float)):
+                    # Sorare restituisce il moltiplicatore totale (es. 1.03 per +3%, o 0.03 come percentuale decimale)
+                    if raw_bonus >= 1.0:
+                        card_multiplier = float(raw_bonus)
                     else:
-                        card_multiplier = 1.0 + float(raw_power)
+                        card_multiplier = 1.0 + float(raw_bonus)
+                elif grade is not None and isinstance(grade, (int, float)):
+                    # Livello XP: per le Limited ogni livello dà tipicamente +0.5% (o +1%)
+                    xp_bonus = (float(grade) * 0.5) / 100.0
+                    season_bonus = 0.05 if is_in_season else 0.0
+                    card_multiplier = 1.0 + xp_bonus + season_bonus
                 else:
-                    # Fallback sicuro se power non è popolato: +5% se in season, 0% classic base
                     season_bonus = 0.05 if is_in_season else 0.0
                     card_multiplier = 1.0 + season_bonus
 
@@ -261,7 +266,7 @@ if st.sidebar.button("🔄 Sincronizza Dati GW"):
     st.session_state["saved_lineups"] = {}
     st.sidebar.success("Cache aggiornata!")
 
-with st.spinner("Scaricamento delle tue carte Limited con bonus attivi..."):
+with st.spinner("Scaricamento delle tue carte Limited con tutti i bonus attivi..."):
     df = fetch_gallery_data(user_input)
 
 if df.empty:
@@ -414,7 +419,7 @@ with tab_builder:
                 already_chosen = [c["card_slug"] for c in selected_cards.values() if c is not None]
                 candidates = candidates[~candidates["card_slug"].isin(already_chosen)]
                 
-                # Etichetta unificata con pallino e bonus totale reale
+                # Etichetta unificata che riporta tutti i bonus reali attivi
                 options_dict = {
                     f"{row['name']} ({row['club_name']}) - {'🟢' if row['is_in_season'] else '⚪'} (+{row['bonus_pct']}%) - Ruolo: {row['position']} - L5: {row['l5_apps']}/5": row['card_slug']
                     for _, row in candidates.iterrows()
@@ -430,7 +435,7 @@ with tab_builder:
                     selected_cards[slot] = None
                     
         with col_stats:
-            st.write("##### Monitoraggio Punteggi Attesi (Con Bonus Reali)")
+            st.write("##### Monitoraggio Punteggi Attesi (Con Tutti i Bonus)")
             active_lineup = [c for c in selected_cards.values() if c is not None]
             
             if len(active_lineup) == len(slots_needed):
@@ -478,7 +483,6 @@ with tab_h2h:
     st.subheader("⚔️ Confronto Diretto Ballottaggi (Tutte le Versioni)")
     col1, col2 = st.columns(2)
     
-    # Stessa interfaccia grafica usata nel builder per selezionare qualsiasi versione
     h2h_options = {
         f"{row['name']} ({row['club_name']}) - {'🟢 In-S' if row['is_in_season'] else '⚪ Classic'} (+{row['bonus_pct']}%) - {row['position']} - L5: {row['l5_apps']}/5 [id:{row['card_slug'][-6:]}]": row['card_slug']
         for _, row in df.iterrows()
@@ -517,7 +521,7 @@ with tab_h2h:
 
 # --- TAB 3: ROSA GENERALE ---
 with tab_gallery:
-    st.subheader("📊 Rosa Ufficiale Limited con Bonus Reali")
+    st.subheader("📊 Rosa Ufficiale Limited con Tutti i Bonus")
     display_df = df[["name", "club_name", "league_name", "position", "is_in_season", "bonus_pct", "multiplier", "floor_idx", "ceiling_idx", "card_slug"]].copy()
     display_df["is_in_season"] = display_df["is_in_season"].apply(lambda x: "🟢 In-Season (2026)" if x else "⚪ Classic")
     display_df["bonus_pct"] = display_df["bonus_pct"].apply(lambda x: f"+{x}%")
@@ -531,7 +535,7 @@ with tab_gallery:
             "league_name": "Campionato",
             "position": "Ruolo",
             "is_in_season": "Stagionalità",
-            "bonus_pct": "Bonus Carta",
+            "bonus_pct": "Bonus Totale (XP + Collezione + IS)",
             "multiplier": "Moltiplicatore",
             "floor_idx": "Floor Base",
             "ceiling_idx": "Ceiling Base",
