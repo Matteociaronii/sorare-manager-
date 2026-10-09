@@ -82,48 +82,81 @@ UEL_UECL_CLUBS_2026_27 = [
 
 HOT_STREAK_STEPS = [320, 360, 380, 420, 440, 470, 550]
 
-# Query GraphQL corretta con 'bonuses'
-QUERY_USER_GALLERY = """
-query GetUserGalleryCards($slug: String!,$cursor: String) {
-  user(slug: $slug) {
-    cards(first: 20, after: $cursor) {
-      pageInfo {
-        hasNextPage
-        endCursor
-      }
-      nodes {
-        slug
-        rarityTyped
-        ... on Card {
-          positionTyped
-          bonuses {
-            total
-            level
-            collection
-            season
-          }
-          season {
-            startYear
-          }
-          player {
-            slug
-            displayName
-            position
-            activeClub {
-              name
-              domesticLeague {
-                slug
-                name
-              }
-            }
-            lastFiveSo5Appearances
-          }
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+    "Content-Type": "application/json",
+    "Accept": "application/json"
+}
+
+# Funzione per identificare i campi validi di So5AppearanceBonusInterface
+@st.cache_data(ttl=3600, show_spinner=False)
+def inspect_bonus_fields():
+    introspection_query = """
+    query {
+      __type(name: "So5AppearanceBonusInterface") {
+        fields {
+          name
         }
       }
     }
-  }
-}
-"""
+    """
+    try:
+        r = requests.post(API_URL, json={"query": introspection_query}, headers=HEADERS, timeout=10)
+        res = r.json()
+        f_list = res.get("data", {}).get("__type", {}).get("fields", [])
+        names = [f["name"] for f in f_list if "name" in f]
+        return names
+    except Exception:
+        return []
+
+def build_graphql_query(bonus_field_names):
+    # Se il campo percentage o value è presente in So5AppearanceBonusInterface
+    bonus_subfields = []
+    for cand in ["percentage", "value", "type", "__typename"]:
+        if cand in bonus_field_names or cand == "__typename":
+            bonus_subfields.append(cand)
+            
+    bonus_selection = " ".join(bonus_subfields) if bonus_subfields else "__typename"
+    
+    query = f"""
+    query GetUserGalleryCards($slug: String!,$cursor: String) {{
+      user(slug: $slug) {{
+        cards(first: 20, after: $cursor) {{
+          pageInfo {{
+            hasNextPage
+            endCursor
+          }}
+          nodes {{
+            slug
+            rarityTyped
+            ... on Card {{
+              positionTyped
+              bonuses {{
+                {bonus_selection}
+              }}
+              season {{
+                startYear
+              }}
+              player {{
+                slug
+                displayName
+                position
+                activeClub {{
+                  name
+                  domesticLeague {{
+                    slug
+                    name
+                  }}
+                }}
+                lastFiveSo5Appearances
+              }}
+            }}
+          }}
+        }}
+      }}
+    }}
+    """
+    return query
 
 def extract_slug(input_val):
     val = input_val.strip()
@@ -139,19 +172,17 @@ def fetch_gallery_data(raw_slug):
     cards_data = []
     cursor = None
     has_next = True
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-        "Content-Type": "application/json",
-        "Accept": "application/json"
-    }
+    
+    bonus_fields = inspect_bonus_fields()
+    query_string = build_graphql_query(bonus_fields)
     
     while has_next:
         variables = {"slug": user_slug, "cursor": cursor}
         try:
             resp = requests.post(
                 API_URL,
-                json={"query": QUERY_USER_GALLERY, "variables": variables},
-                headers=headers,
+                json={"query": query_string, "variables": variables},
+                headers=HEADERS,
                 timeout=15
             )
             resp_json = resp.json()
@@ -182,27 +213,30 @@ def fetch_gallery_data(raw_slug):
                 card_year = card.get("season", {}).get("startYear", 0)
                 is_in_season = (card_year == IN_SEASON_YEAR)
                 
-                # ESTRAZIONE BONUS UFFICIALE TRAMITE IL CAMPO 'bonuses'
-                bonuses_obj = card.get("bonuses") or {}
-                raw_total = bonuses_obj.get("total")
+                # ESTRAZIONE E SOMMA DI TUTTI I BONUS ATTIVI (Livello + Collezione + In-Season)
+                raw_bonuses = card.get("bonuses") or []
+                total_bonus_val = 0.0
                 
-                if raw_total is not None and isinstance(raw_total, (int, float)):
-                    if raw_total >= 1.0:
-                        card_multiplier = float(raw_total)
+                if isinstance(raw_bonuses, list) and len(raw_bonuses) > 0:
+                    for b in raw_bonuses:
+                        if isinstance(b, dict):
+                            val = b.get("percentage") or b.get("value")
+                            if val is not None and isinstance(val, (int, float)):
+                                total_bonus_val += float(val)
+                                
+                # Normalizzazione percentuale
+                if total_bonus_val > 0.0:
+                    # Se l'API restituisce 5 per 5%, o 0.05 per 5%
+                    if total_bonus_val < 0.5:
+                        card_multiplier = 1.0 + total_bonus_val
+                        bonus_percentage = round(total_bonus_val * 100.0, 1)
                     else:
-                        card_multiplier = 1.0 + float(raw_total)
+                        card_multiplier = 1.0 + (total_bonus_val / 100.0)
+                        bonus_percentage = round(total_bonus_val, 1)
                 else:
-                    level_b = float(bonuses_obj.get("level") or 0.0)
-                    collec_b = float(bonuses_obj.get("collection") or 0.0)
-                    season_b = float(bonuses_obj.get("season") or (0.05 if is_in_season else 0.0))
-                    
-                    sum_b = level_b + collec_b + season_b
-                    if sum_b >= 1.0:
-                        card_multiplier = sum_b
-                    else:
-                        card_multiplier = 1.0 + sum_b
-
-                bonus_percentage = round((card_multiplier - 1.0) * 100.0, 1)
+                    season_bonus = 0.05 if is_in_season else 0.0
+                    card_multiplier = 1.0 + season_bonus
+                    bonus_percentage = round(season_bonus * 100.0, 1)
 
                 l5_apps = player.get("lastFiveSo5Appearances", 0) or 0
                 starter_rate = round(min(100.0, (l5_apps / 5.0) * 100.0), 1)
@@ -424,6 +458,7 @@ with tab_builder:
                 already_chosen = [c["card_slug"] for c in selected_cards.values() if c is not None]
                 candidates = candidates[~candidates["card_slug"].isin(already_chosen)]
                 
+                # Etichetta unificata che riporta la somma reale dei bonus attivi
                 options_dict = {
                     f"{row['name']} ({row['club_name']}) - {'🟢' if row['is_in_season'] else '⚪'} (+{row['bonus_pct']}%) - Ruolo: {row['position']} - L5: {row['l5_apps']}/5": row['card_slug']
                     for _, row in candidates.iterrows()
