@@ -16,23 +16,23 @@ st.set_page_config(
 API_URL = "https://api.sorare.com/graphql"
 IN_SEASON_YEAR = 2026
 
-# Campionati domestici singoli (Serie A esclusa dai tornei singoli come richiesto)
-DOMESTIC_LEAGUES = {
-    "premier-league": "Premier League",
-    "laliga-santander": "LaLiga EA Sports",
-    "bundesliga": "Bundesliga",
-    "ligue-1": "Ligue 1 McDonald's",
-    "eredivisie": "Eredivisie",
-    "liga-portugal": "Liga Portugal Betclic",
-    "jupiler-pro-league": "Jupiler Pro League",
-    "premiership": "Scottish Premiership (SPFL)",
-    "mls": "Major League Soccer (MLS)"
+# Mappa campionati: parole chiave per intercettare nome o slug di Sorare
+LEAGUE_KEYWORDS = {
+    "Premier League": ["premier", "epl", "england"],
+    "LaLiga EA Sports": ["laliga", "spain", "santander"],
+    "Bundesliga": ["bundesliga", "germany"],
+    "Ligue 1": ["ligue 1", "ligue-1", "france"],
+    "Eredivisie": ["eredivisie", "netherlands", "holland"],
+    "Liga Portugal": ["portugal", "betclic", "primeira"],
+    "Jupiler Pro League": ["jupiler", "belgium"],
+    "Scottish Premiership": ["premiership", "scotland", "spfl"],
+    "MLS": ["mls", "major league soccer", "usa"]
 }
 
-TOP_5_LEAGUES = ["premier-league", "laliga-santander", "serie-a", "bundesliga", "ligue-1"]
+TOP_5_KEYWORDS = ["premier", "epl", "laliga", "spain", "serie a", "serie-a", "italy", "bundesliga", "germany", "ligue 1", "france"]
+CHALLENGER_KEYWORDS = ["eredivisie", "portugal", "jupiler", "belgium", "scotland", "turkey", "austria", "swiss"]
 HOT_STREAK_STEPS = [320, 360, 380, 420, 440, 470, 550]
 
-# Query GraphQL ottimizzata (complexity < 500)
 QUERY_USER_GALLERY = """
 query GetUserGalleryCards($slug: String!, $cursor: String) {
   user(slug: $slug) {
@@ -106,7 +106,6 @@ def fetch_gallery_data(raw_slug):
                 
             user_node = resp_json.get("data", {}).get("user")
             if not user_node:
-                st.sidebar.warning("Utente non trovato su Sorare.")
                 break
                 
             cards_connection = user_node.get("cards", {}) or {}
@@ -131,6 +130,8 @@ def fetch_gallery_data(raw_slug):
                 ceiling_idx = round(mean_l5 * 1.35, 1)
 
                 raw_pos = str(player.get("position", "")).strip().upper()
+                l_slug = str(domestic_league.get("slug", "")).lower()
+                l_name = str(domestic_league.get("name", "Altro"))
 
                 cards_data.append({
                     "card_slug": card.get("slug"),
@@ -142,8 +143,9 @@ def fetch_gallery_data(raw_slug):
                     "is_in_season": is_in_season,
                     "multiplier": card_multiplier,
                     "club_name": active_club.get("name", "Svincolato"),
-                    "league_slug": domestic_league.get("slug", "other"),
-                    "league_name": domestic_league.get("name", "Altro"),
+                    "league_slug": l_slug,
+                    "league_name": l_name,
+                    "league_tag": f"{l_name} ({l_slug})".lower(),
                     "l5_avg": round(mean_l5, 1),
                     "floor_idx": floor_idx,
                     "ceiling_idx": ceiling_idx,
@@ -183,7 +185,7 @@ with st.spinner("Scaricamento della tua galleria Sorare..."):
     df = fetch_gallery_data(user_input)
 
 if df.empty:
-    st.warning("Nessuna carta trovata per questo account o recupero in corso.")
+    st.warning("Nessuna carta trovata per questo account. Verifica lo username nella barra laterale.")
     st.stop()
 
 st.sidebar.divider()
@@ -203,41 +205,66 @@ st.sidebar.subheader("Competizione Selezionata")
 
 comp_type = st.sidebar.selectbox(
     "Categoria Torneo",
-    ["Tutte le Carte (Libero)", "Classic SO7", "In-Season Domestico (SO5)", "In-Season Coppe Europee (SO5)"]
+    [
+        "Champion Europe (Top 5 Leghe)",
+        "Challenger Europe",
+        "Campionato Singolo Domestico",
+        "UEFA Champions League",
+        "All-Star (Tutti i campionati)"
+    ]
 )
 
 selected_competition = ""
-if comp_type == "Tutte le Carte (Libero)":
-    selected_competition = "Tutta la Galleria"
-elif comp_type == "Classic SO7":
-    selected_competition = st.sidebar.selectbox("Torneo Classic", ["Champion Europe SO7", "All-Star SO7"])
-elif comp_type == "In-Season Domestico (SO5)":
-    selected_competition = st.sidebar.selectbox("Campionato Singolo", list(DOMESTIC_LEAGUES.values()))
-elif comp_type == "In-Season Coppe Europee (SO5)":
-    selected_competition = st.sidebar.selectbox("Coppa Europea", ["UEFA Champions League", "UEFA Europa & Conference League"])
+single_league_choice = ""
+
+if comp_type == "Campionato Singolo Domestico":
+    single_league_choice = st.sidebar.selectbox("Scegli Campionato", list(LEAGUE_KEYWORDS.keys()))
+    selected_competition = f"{single_league_choice}"
+elif comp_type == "Champion Europe (Top 5 Leghe)":
+    sub_format = st.sidebar.radio("Formato Champion", ["Classic SO7", "In-Season SO5", "Classic SO5"])
+    selected_competition = f"Champion Europe ({sub_format})"
+elif comp_type == "Challenger Europe":
+    sub_format = st.sidebar.radio("Formato Challenger", ["Classic SO7", "In-Season SO5", "Classic SO5"])
+    selected_competition = f"Challenger Europe ({sub_format})"
+elif comp_type == "UEFA Champions League":
+    selected_competition = "UEFA Champions League (SO5)"
+else:
+    selected_competition = "All-Star (Tutti i campionati)"
 
 if st.sidebar.button("🗑️ Sblocca Formazioni"):
     st.session_state["locked_cards"] = set()
     st.session_state["saved_lineups"] = {}
     st.rerun()
 
-def filter_eligible_cards(data, comp_cat, comp_name, exclude_locked=True):
+# Logica di filtraggio avanzata e tollerante
+def filter_eligible_cards(data, main_cat, comp_name, single_choice, exclude_locked=True):
     temp = data.copy()
     if exclude_locked:
         temp = temp[~temp["card_slug"].isin(st.session_state["locked_cards"])]
         
-    if comp_cat == "In-Season Domestico (SO5)":
-        target_slug = [k for k, v in DOMESTIC_LEAGUES.items() if v == comp_name][0]
-        temp = temp[temp["league_slug"] == target_slug]
-    elif comp_cat == "Classic SO7":
-        temp = temp[~temp["is_in_season"]]
-        if comp_name == "Champion Europe SO7":
-            temp = temp[temp["league_slug"].isin(TOP_5_LEAGUES)]
-    elif comp_cat == "Tutte le Carte (Libero)":
+    if main_cat == "Campionato Singolo Domestico":
+        keywords = LEAGUE_KEYWORDS.get(single_choice, [])
+        pattern = "|".join(keywords)
+        temp = temp[temp["league_tag"].str.contains(pattern, na=False)]
+        
+    elif main_cat == "Champion Europe (Top 5 Leghe)":
+        pattern = "|".join(TOP_5_KEYWORDS)
+        temp = temp[temp["league_tag"].str.contains(pattern, na=False)]
+        if "In-Season" in comp_name:
+            temp = temp[temp["is_in_season"]]
+            
+    elif main_cat == "Challenger Europe":
+        pattern = "|".join(CHALLENGER_KEYWORDS)
+        temp = temp[temp["league_tag"].str.contains(pattern, na=False)]
+        if "In-Season" in comp_name:
+            temp = temp[temp["is_in_season"]]
+            
+    elif main_cat == "All-Star (Tutti i campionati)":
         pass
+        
     return temp
 
-eligible_df = filter_eligible_cards(df, comp_type, selected_competition)
+eligible_df = filter_eligible_cards(df, comp_type, selected_competition, single_league_choice)
 
 tab_builder, tab_h2h, tab_gallery = st.tabs(["🏆 Builder Formazione", "⚔️ Head-to-Head (1v1)", "📊 Rosa Completa"])
 
@@ -245,90 +272,93 @@ tab_builder, tab_h2h, tab_gallery = st.tabs(["🏆 Builder Formazione", "⚔️ 
 with tab_builder:
     st.subheader(f"Composizione: {selected_competition}")
     
-    is_so7 = (comp_type == "Classic SO7")
+    is_so7 = ("SO7" in selected_competition)
     slots_needed = ["GK", "DEF", "MID", "FWD", "EXTRA"] if not is_so7 else ["GK", "DEF 1", "DEF 2", "MID 1", "MID 2", "FWD", "EXTRA"]
     
-    st.caption(f"Formato: {'SO7 (7 Titolari Classic)' if is_so7 else 'SO5 (Min 4 In-Season + Max 1 Classic)'}")
+    st.caption(f"Carte disponibili per questa competizione: **{len(eligible_df)}**")
     
-    col_layout, col_stats = st.columns([3, 2])
-    
-    with col_layout:
-        st.write("##### Assegnazione Slot Titolari")
-        selected_cards = {}
+    if eligible_df.empty:
+        st.warning("Nessun giocatore della tua rosa corrisponde ai criteri di questa specifica competizione. Prova a selezionare un'altra lega o il formato Classic.")
+    else:
+        col_layout, col_stats = st.columns([3, 2])
         
-        for slot in slots_needed:
-            pos_filter = slot.split()[0]
-            if pos_filter == "EXTRA":
-                candidates = eligible_df[~eligible_df["position"].str.contains("GOALKEEPER|GK", na=False)]
-            elif pos_filter == "GK":
-                candidates = eligible_df[eligible_df["position"].str.contains("GOALKEEPER|GK", na=False)]
-            elif pos_filter == "DEF":
-                candidates = eligible_df[eligible_df["position"].str.contains("DEFENDER|DEF", na=False)]
-            elif pos_filter == "MID":
-                candidates = eligible_df[eligible_df["position"].str.contains("MIDFIELDER|MID", na=False)]
-            elif pos_filter == "FWD":
-                candidates = eligible_df[eligible_df["position"].str.contains("FORWARD|FWD", na=False)]
-            else:
-                candidates = eligible_df
-                
-            already_chosen = [c["card_slug"] for c in selected_cards.values() if c is not None]
-            candidates = candidates[~candidates["card_slug"].isin(already_chosen)]
+        with col_layout:
+            st.write("##### Assegnazione Slot Titolari")
+            selected_cards = {}
             
-            options_dict = {
-                f"{row['name']} ({row['club_name']} - {row['league_name']}) - {'🟢 In-S' if row['is_in_season'] else '⚪ Classic'} - L5 Apps: {row['l5_apps']}/5": row['card_slug']
-                for _, row in candidates.iterrows()
-            }
-            options_list = ["-- Vuoto --"] + list(options_dict.keys())
-            
-            choice = st.selectbox(f"Slot: {slot}", options_list, key=f"sel_{selected_competition}_{slot}")
-            
-            if choice != "-- Vuoto --":
-                c_slug = options_dict[choice]
-                selected_cards[slot] = eligible_df[eligible_df["card_slug"] == c_slug].iloc[0]
-            else:
-                selected_cards[slot] = None
-                
-    with col_stats:
-        st.write("##### Monitoraggio Punteggi Attesi")
-        active_lineup = [c for c in selected_cards.values() if c is not None]
-        
-        if len(active_lineup) == len(slots_needed):
-            if not is_so7 and comp_type != "Tutte le Carte (Libero)":
-                in_season_count = sum(1 for c in active_lineup if c["is_in_season"])
-                if in_season_count < 4:
-                    st.error(f"⚠️ Servono almeno 4 carte In-Season! (Attuali: {in_season_count})")
+            for slot in slots_needed:
+                pos_filter = slot.split()[0]
+                if pos_filter == "EXTRA":
+                    candidates = eligible_df[~eligible_df["position"].str.contains("GOALKEEPER|GK", na=False)]
+                elif pos_filter == "GK":
+                    candidates = eligible_df[eligible_df["position"].str.contains("GOALKEEPER|GK", na=False)]
+                elif pos_filter == "DEF":
+                    candidates = eligible_df[eligible_df["position"].str.contains("DEFENDER|DEF", na=False)]
+                elif pos_filter == "MID":
+                    candidates = eligible_df[eligible_df["position"].str.contains("MIDFIELDER|MID", na=False)]
+                elif pos_filter == "FWD":
+                    candidates = eligible_df[eligible_df["position"].str.contains("FORWARD|FWD", na=False)]
                 else:
-                    st.success("✅ Requisito In-Season rispettato (Min. 4 carte).")
-            
-            cap_candidate = max(active_lineup, key=lambda x: x["ceiling_idx"])
-            st.info(f"🎖️ **Capitano Consigliato (+50%):** {cap_candidate['name']}")
-            
-            tot_floor = 0
-            tot_ceiling = 0
-            for c in active_lineup:
-                mult = c["multiplier"] * (1.5 if c["card_slug"] == cap_candidate["card_slug"] else 1.0)
-                tot_floor += c["floor_idx"] * mult
-                tot_ceiling += c["ceiling_idx"] * mult
-                
-            st.metric("Floor Previsto Totale", f"{tot_floor:.1f} pt")
-            st.metric("Ceiling Potenziale Totale", f"{tot_ceiling:.1f} pt")
-            
-            if game_mode.startswith("Pro"):
-                if tot_floor >= target_threshold:
-                    st.success(f"🎯 Target {target_threshold} pt coperto in piena sicurezza dal Floor!")
-                elif tot_ceiling >= target_threshold:
-                    st.warning(f"⚡ Raggiungibile tramite Ceiling (Floor: {tot_floor:.1f} / Target: {target_threshold})")
-                else:
-                    st.error(f"❌ Punteggio insufficiente per il target {target_threshold} pt.")
+                    candidates = eligible_df
                     
-            if st.button("🔒 Salva & Blocca Carte per la GW"):
+                already_chosen = [c["card_slug"] for c in selected_cards.values() if c is not None]
+                candidates = candidates[~candidates["card_slug"].isin(already_chosen)]
+                
+                options_dict = {
+                    f"{row['name']} ({row['club_name']}) - {'🟢 In-S' if row['is_in_season'] else '⚪ Classic'} - Presenze L5: {row['l5_apps']}/5": row['card_slug']
+                    for _, row in candidates.iterrows()
+                }
+                options_list = ["-- Vuoto --"] + list(options_dict.keys())
+                
+                choice = st.selectbox(f"Slot: {slot}", options_list, key=f"sel_{selected_competition}_{slot}")
+                
+                if choice != "-- Vuoto --":
+                    c_slug = options_dict[choice]
+                    selected_cards[slot] = eligible_df[eligible_df["card_slug"] == c_slug].iloc[0]
+                else:
+                    selected_cards[slot] = None
+                    
+        with col_stats:
+            st.write("##### Monitoraggio Punteggi Attesi")
+            active_lineup = [c for c in selected_cards.values() if c is not None]
+            
+            if len(active_lineup) == len(slots_needed):
+                if "In-Season" in selected_competition:
+                    in_season_count = sum(1 for c in active_lineup if c["is_in_season"])
+                    if in_season_count < 4:
+                        st.error(f"⚠️ Servono almeno 4 carte In-Season! (Attuali: {in_season_count})")
+                    else:
+                        st.success("✅ Requisito In-Season rispettato (Min. 4 carte).")
+                
+                cap_candidate = max(active_lineup, key=lambda x: x["ceiling_idx"])
+                st.info(f"🎖️ **Capitano Consigliato (+50%):** {cap_candidate['name']}")
+                
+                tot_floor = 0
+                tot_ceiling = 0
                 for c in active_lineup:
-                    st.session_state["locked_cards"].add(c["card_slug"])
-                st.session_state["saved_lineups"][selected_competition] = active_lineup
-                st.success("Formazione registrata: carte bloccate per i restanti tornei!")
-                st.rerun()
-        else:
-            st.info(f"Seleziona tutti i {len(slots_needed)} slot per visualizzare le metriche.")
+                    mult = c["multiplier"] * (1.5 if c["card_slug"] == cap_candidate["card_slug"] else 1.0)
+                    tot_floor += c["floor_idx"] * mult
+                    tot_ceiling += c["ceiling_idx"] * mult
+                    
+                st.metric("Floor Previsto Totale", f"{tot_floor:.1f} pt")
+                st.metric("Ceiling Potenziale Totale", f"{tot_ceiling:.1f} pt")
+                
+                if game_mode.startswith("Pro"):
+                    if tot_floor >= target_threshold:
+                        st.success(f"🎯 Target {target_threshold} pt coperto in piena sicurezza dal Floor!")
+                    elif tot_ceiling >= target_threshold:
+                        st.warning(f"⚡ Raggiungibile tramite Ceiling (Floor: {tot_floor:.1f} / Target: {target_threshold})")
+                    else:
+                        st.error(f"❌ Punteggio insufficiente per il target {target_threshold} pt.")
+                        
+                if st.button("🔒 Salva & Blocca Carte per la GW"):
+                    for c in active_lineup:
+                        st.session_state["locked_cards"].add(c["card_slug"])
+                    st.session_state["saved_lineups"][selected_competition] = active_lineup
+                    st.success("Formazione registrata: carte bloccate per i restanti tornei!")
+                    st.rerun()
+            else:
+                st.info(f"Seleziona tutti i {len(slots_needed)} slot per visualizzare le metriche.")
 
 # --- TAB 2: HEAD TO HEAD ---
 with tab_h2h:
