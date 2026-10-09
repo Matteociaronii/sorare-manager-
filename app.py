@@ -16,7 +16,7 @@ st.set_page_config(
 API_URL = "https://api.sorare.com/graphql"
 IN_SEASON_YEAR = 2026
 
-# Campionati domestici disponibili (Serie A rimossa dai tornei singoli)
+# Campionati domestici singoli (Serie A esclusa dai tornei singoli come richiesto)
 DOMESTIC_LEAGUES = {
     "premier-league": "Premier League",
     "laliga-santander": "LaLiga EA Sports",
@@ -32,7 +32,7 @@ DOMESTIC_LEAGUES = {
 TOP_5_LEAGUES = ["premier-league", "laliga-santander", "serie-a", "bundesliga", "ligue-1"]
 HOT_STREAK_STEPS = [320, 360, 380, 420, 440, 470, 550]
 
-# Query leggera con complessità < 500 per rispettare i limiti senza API key
+# Query GraphQL ottimizzata (complexity < 500)
 QUERY_USER_GALLERY = """
 query GetUserGalleryCards($slug: String!, $cursor: String) {
   user(slug: $slug) {
@@ -88,7 +88,6 @@ def fetch_gallery_data(raw_slug):
         "Accept": "application/json"
     }
     
-    # Ciclo di paginazione automatica a blocchi di 20 carte
     while has_next:
         variables = {"slug": user_slug, "cursor": cursor}
         try:
@@ -127,16 +126,17 @@ def fetch_gallery_data(raw_slug):
                 l5_apps = player.get("lastFiveSo5Appearances", 0) or 0
                 starter_rate = round(min(100.0, (l5_apps / 5.0) * 100.0), 1)
                 
-                # Baseline realistica in base a titolarità
                 mean_l5 = 54.0 if starter_rate >= 80 else (45.0 if starter_rate >= 40 else 35.0)
                 floor_idx = round(mean_l5 * 0.8, 1)
                 ceiling_idx = round(mean_l5 * 1.35, 1)
+
+                raw_pos = str(player.get("position", "")).strip().upper()
 
                 cards_data.append({
                     "card_slug": card.get("slug"),
                     "player_slug": player.get("slug"),
                     "name": player.get("displayName"),
-                    "position": player.get("position"),
+                    "position": raw_pos,
                     "rarity": card.get("rarityTyped", "limited"),
                     "season_year": card_year,
                     "is_in_season": is_in_season,
@@ -183,7 +183,7 @@ with st.spinner("Scaricamento della tua galleria Sorare..."):
     df = fetch_gallery_data(user_input)
 
 if df.empty:
-    st.warning("Nessuna carta trovata per questo account o recupero in corso. Se il caricamento fallisce, controlla il messaggio di errore nella barra laterale.")
+    st.warning("Nessuna carta trovata per questo account o recupero in corso.")
     st.stop()
 
 st.sidebar.divider()
@@ -203,18 +203,18 @@ st.sidebar.subheader("Competizione Selezionata")
 
 comp_type = st.sidebar.selectbox(
     "Categoria Torneo",
-    ["In-Season Domestico (SO5)", "In-Season Coppe Europee (SO5)", "Classic SO7", "Tutte le Carte (Libero)"]
+    ["Tutte le Carte (Libero)", "Classic SO7", "In-Season Domestico (SO5)", "In-Season Coppe Europee (SO5)"]
 )
 
 selected_competition = ""
-if comp_type == "In-Season Domestico (SO5)":
+if comp_type == "Tutte le Carte (Libero)":
+    selected_competition = "Tutta la Galleria"
+elif comp_type == "Classic SO7":
+    selected_competition = st.sidebar.selectbox("Torneo Classic", ["Champion Europe SO7", "All-Star SO7"])
+elif comp_type == "In-Season Domestico (SO5)":
     selected_competition = st.sidebar.selectbox("Campionato Singolo", list(DOMESTIC_LEAGUES.values()))
 elif comp_type == "In-Season Coppe Europee (SO5)":
     selected_competition = st.sidebar.selectbox("Coppa Europea", ["UEFA Champions League", "UEFA Europa & Conference League"])
-elif comp_type == "Classic SO7":
-    selected_competition = st.sidebar.selectbox("Torneo Classic", ["Champion Europe SO7", "All-Star SO7"])
-else:
-    selected_competition = "Tutta la Galleria"
 
 if st.sidebar.button("🗑️ Sblocca Formazioni"):
     st.session_state["locked_cards"] = set()
@@ -233,6 +233,8 @@ def filter_eligible_cards(data, comp_cat, comp_name, exclude_locked=True):
         temp = temp[~temp["is_in_season"]]
         if comp_name == "Champion Europe SO7":
             temp = temp[temp["league_slug"].isin(TOP_5_LEAGUES)]
+    elif comp_cat == "Tutte le Carte (Libero)":
+        pass
     return temp
 
 eligible_df = filter_eligible_cards(df, comp_type, selected_competition)
@@ -257,10 +259,15 @@ with tab_builder:
         for slot in slots_needed:
             pos_filter = slot.split()[0]
             if pos_filter == "EXTRA":
-                candidates = eligible_df[eligible_df["position"] != "Goalkeeper"]
-            elif pos_filter in ["GK", "DEF", "MID", "FWD"]:
-                role_map = {"GK": "Goalkeeper", "DEF": "Defender", "MID": "Midfielder", "FWD": "Forward"}
-                candidates = eligible_df[eligible_df["position"] == role_map[pos_filter]]
+                candidates = eligible_df[~eligible_df["position"].str.contains("GOALKEEPER|GK", na=False)]
+            elif pos_filter == "GK":
+                candidates = eligible_df[eligible_df["position"].str.contains("GOALKEEPER|GK", na=False)]
+            elif pos_filter == "DEF":
+                candidates = eligible_df[eligible_df["position"].str.contains("DEFENDER|DEF", na=False)]
+            elif pos_filter == "MID":
+                candidates = eligible_df[eligible_df["position"].str.contains("MIDFIELDER|MID", na=False)]
+            elif pos_filter == "FWD":
+                candidates = eligible_df[eligible_df["position"].str.contains("FORWARD|FWD", na=False)]
             else:
                 candidates = eligible_df
                 
