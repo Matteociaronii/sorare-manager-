@@ -16,21 +16,43 @@ st.set_page_config(
 API_URL = "https://api.sorare.com/graphql"
 IN_SEASON_YEAR = 2026
 
-# Mappa campionati: parole chiave per intercettare nome o slug di Sorare
-LEAGUE_KEYWORDS = {
-    "Premier League": ["premier", "epl", "england"],
-    "LaLiga EA Sports": ["laliga", "spain", "santander"],
-    "Bundesliga": ["bundesliga", "germany"],
-    "Ligue 1": ["ligue 1", "ligue-1", "france"],
-    "Eredivisie": ["eredivisie", "netherlands", "holland"],
-    "Liga Portugal": ["portugal", "betclic", "primeira"],
-    "Jupiler Pro League": ["jupiler", "belgium"],
-    "Scottish Premiership": ["premiership", "scotland", "spfl"],
-    "MLS": ["mls", "major league soccer", "usa"]
+# Riconoscimento rigoroso TOP 5 LEGHE per Champion Europe (Inclusa Serie A per Champion, esclusa dai singoli)
+TOP_5_LEAGUE_SLUGS = [
+    "premier-league",
+    "england-premier-league",
+    "laliga-santander",
+    "spain-laliga",
+    "serie-a",
+    "italy-serie-a",
+    "bundesliga",
+    "germany-bundesliga",
+    "ligue-1",
+    "france-ligue-1"
+]
+
+# Campionati Challenger Europe
+CHALLENGER_LEAGUE_SLUGS = [
+    "eredivisie", "netherlands-eredivisie",
+    "liga-portugal", "portugal-primeira-liga",
+    "jupiler-pro-league", "belgium-pro-league",
+    "premiership", "scotland-premiership",
+    "super-lig", "turkey-super-lig",
+    "austrian-bundesliga", "swiss-super-league"
+]
+
+# Campionati domestici singoli disponibili (Serie A rimossa dai tornei singoli)
+DOMESTIC_LEAGUES_MAP = {
+    "Premier League": ["premier-league", "england-premier-league"],
+    "LaLiga EA Sports": ["laliga-santander", "spain-laliga"],
+    "Bundesliga": ["bundesliga", "germany-bundesliga"],
+    "Ligue 1": ["ligue-1", "france-ligue-1"],
+    "Eredivisie": ["eredivisie", "netherlands-eredivisie"],
+    "Liga Portugal": ["liga-portugal", "portugal-primeira-liga"],
+    "Jupiler Pro League": ["jupiler-pro-league", "belgium-pro-league"],
+    "Scottish Premiership": ["premiership", "scotland-premiership"],
+    "MLS": ["mls", "major-league-soccer"]
 }
 
-TOP_5_KEYWORDS = ["premier", "epl", "laliga", "spain", "serie a", "serie-a", "italy", "bundesliga", "germany", "ligue 1", "france"]
-CHALLENGER_KEYWORDS = ["eredivisie", "portugal", "jupiler", "belgium", "scotland", "turkey", "austria", "swiss"]
 HOT_STREAK_STEPS = [320, 360, 380, 420, 440, 470, 550]
 
 QUERY_USER_GALLERY = """
@@ -112,7 +134,7 @@ def fetch_gallery_data(raw_slug):
             nodes = cards_connection.get("nodes", []) if isinstance(cards_connection, dict) else []
             
             for card in nodes:
-                # FILTRO ESCLUSIVO LIMITED: scarta comuni o altre rarità non richieste
+                # FILTRO RIGIDO: SOLO LIMITED
                 rarity = str(card.get("rarityTyped", "")).lower()
                 if rarity != "limited":
                     continue
@@ -135,7 +157,7 @@ def fetch_gallery_data(raw_slug):
                 ceiling_idx = round(mean_l5 * 1.35, 1)
 
                 raw_pos = str(player.get("position", "")).strip().upper()
-                l_slug = str(domestic_league.get("slug", "")).lower()
+                l_slug = str(domestic_league.get("slug", "")).lower().strip()
                 l_name = str(domestic_league.get("name", "Altro"))
 
                 cards_data.append({
@@ -150,7 +172,6 @@ def fetch_gallery_data(raw_slug):
                     "club_name": active_club.get("name", "Svincolato"),
                     "league_slug": l_slug,
                     "league_name": l_name,
-                    "league_tag": f"{l_name} ({l_slug})".lower(),
                     "l5_avg": round(mean_l5, 1),
                     "floor_idx": floor_idx,
                     "ceiling_idx": ceiling_idx,
@@ -190,7 +211,7 @@ with st.spinner("Scaricamento delle tue carte Limited..."):
     df = fetch_gallery_data(user_input)
 
 if df.empty:
-    st.warning("Nessuna carta Limited trovata per questo account. Verifica lo username nella barra laterale.")
+    st.warning("Nessuna carta Limited trovata per questo account.")
     st.stop()
 
 st.sidebar.divider()
@@ -222,15 +243,15 @@ comp_type = st.sidebar.selectbox(
 selected_competition = ""
 single_league_choice = ""
 
-if comp_type == "Campionato Singolo Domestico":
-    single_league_choice = st.sidebar.selectbox("Scegli Campionato", list(LEAGUE_KEYWORDS.keys()))
-    selected_competition = f"{single_league_choice}"
-elif comp_type == "Champion Europe (Top 5 Leghe)":
+if comp_type == "Champion Europe (Top 5 Leghe)":
     sub_format = st.sidebar.radio("Formato Champion", ["Classic SO7", "In-Season SO5", "Classic SO5"])
     selected_competition = f"Champion Europe ({sub_format})"
 elif comp_type == "Challenger Europe":
     sub_format = st.sidebar.radio("Formato Challenger", ["Classic SO7", "In-Season SO5", "Classic SO5"])
     selected_competition = f"Challenger Europe ({sub_format})"
+elif comp_type == "Campionato Singolo Domestico":
+    single_league_choice = st.sidebar.selectbox("Scegli Campionato", list(DOMESTIC_LEAGUES_MAP.keys()))
+    selected_competition = f"{single_league_choice}"
 elif comp_type == "UEFA Champions League":
     selected_competition = "UEFA Champions League (SO5)"
 else:
@@ -241,29 +262,29 @@ if st.sidebar.button("🗑️ Sblocca Formazioni"):
     st.session_state["saved_lineups"] = {}
     st.rerun()
 
-# Logica di filtraggio tollerante
+# Filtraggio rigoroso per lega effettiva
 def filter_eligible_cards(data, main_cat, comp_name, single_choice, exclude_locked=True):
     temp = data.copy()
     if exclude_locked:
         temp = temp[~temp["card_slug"].isin(st.session_state["locked_cards"])]
         
-    if main_cat == "Campionato Singolo Domestico":
-        keywords = LEAGUE_KEYWORDS.get(single_choice, [])
-        pattern = "|".join(keywords)
-        temp = temp[temp["league_tag"].str.contains(pattern, na=False)]
-        
-    elif main_cat == "Champion Europe (Top 5 Leghe)":
-        pattern = "|".join(TOP_5_KEYWORDS)
-        temp = temp[temp["league_tag"].str.contains(pattern, na=False)]
+    if main_cat == "Champion Europe (Top 5 Leghe)":
+        # FILTRO RIGIDO: Solo Premier, LaLiga, Serie A, 1. Bundesliga, Ligue 1
+        # Esclude Celtic (Scottish Premiership) e 2. Bundesliga / club retrocessi
+        temp = temp[temp["league_slug"].apply(lambda s: any(top_slug in s for top_slug in TOP_5_LEAGUE_SLUGS))]
         if "In-Season" in comp_name:
             temp = temp[temp["is_in_season"]]
-            
+
     elif main_cat == "Challenger Europe":
-        pattern = "|".join(CHALLENGER_KEYWORDS)
-        temp = temp[temp["league_tag"].str.contains(pattern, na=False)]
+        # FILTRO RIGIDO: Solo campionati europei secondari (Scozia, Olanda, Portogallo, Belgio, ecc.)
+        temp = temp[temp["league_slug"].apply(lambda s: any(ch_slug in s for ch_slug in CHALLENGER_LEAGUE_SLUGS))]
         if "In-Season" in comp_name:
             temp = temp[temp["is_in_season"]]
-            
+
+    elif main_cat == "Campionato Singolo Domestico":
+        allowed_slugs = DOMESTIC_LEAGUES_MAP.get(single_choice, [])
+        temp = temp[temp["league_slug"].apply(lambda s: any(target in s for target in allowed_slugs))]
+
     elif main_cat == "All-Star (Tutti i campionati)":
         pass
         
@@ -283,7 +304,7 @@ with tab_builder:
     st.caption(f"Carte Limited disponibili per questa competizione: **{len(eligible_df)}**")
     
     if eligible_df.empty:
-        st.warning("Nessuna carta Limited corrisponde ai criteri di questa specifica competizione. Prova a selezionare un'altra lega o il formato Classic.")
+        st.warning("Nessuna carta Limited corrisponde ai criteri di questa specifica competizione.")
     else:
         col_layout, col_stats = st.columns([3, 2])
         
@@ -310,7 +331,7 @@ with tab_builder:
                 candidates = candidates[~candidates["card_slug"].isin(already_chosen)]
                 
                 options_dict = {
-                    f"{row['name']} ({row['club_name']}) - {'🟢 In-S' if row['is_in_season'] else '⚪ Classic'} - L5 Apps: {row['l5_apps']}/5": row['card_slug']
+                    f"{row['name']} ({row['club_name']} - {row['league_name']}) - {'🟢 In-S' if row['is_in_season'] else '⚪ Classic'} - L5: {row['l5_apps']}/5": row['card_slug']
                     for _, row in candidates.iterrows()
                 }
                 options_list = ["-- Vuoto --"] + list(options_dict.keys())
