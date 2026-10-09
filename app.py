@@ -16,26 +16,26 @@ st.set_page_config(
 API_URL = "https://api.sorare.com/graphql"
 IN_SEASON_YEAR = 2026
 
-# Riconoscimento Top 5 leghe (Inghilterra, Spagna, Italia, Germania 1, Francia)
-# Serie A inclusa per Champion, esclusa dai singoli campionati
+# Pattern validi per le sole Top 5 prime divisioni europee
 TOP_5_PATTERNS = ["premier", "laliga", "serie-a", "serie a", "bundesliga", "ligue 1", "ligue-1"]
 
-# Esclusioni categoriche da Champion e dalle prime divisioni
+# Esclusioni categoriche da Champion Europe (seconde divisioni, leghe minori e Sud America/Brasile)
 EXCLUDED_PATTERNS = [
     "scotland", "premiership", "spfl", "scottish",
     "bundesliga-2", "2-bundesliga", "2. bundesliga",
     "segunda", "serie-b", "serie b", "ligue-2", "ligue 2",
-    "championship", "austria", "austrian", "swiss", "switzerland"
+    "championship", "austria", "austrian", "swiss", "switzerland",
+    "brazil", "brasileirao", "brasileiro", "argentina", "superliga-argentina", "libertadores", "sudamericana"
 ]
 
-# Challenger Europe (Scozia, Olanda, Portogallo, Belgio, Turchia, Austria, ecc.)
+# Challenger Europe (leghe europee primarie non-Top 5)
 CHALLENGER_PATTERNS = [
     "scotland", "premiership", "spfl", "portugal", "primeira", "betclic",
     "eredivisie", "netherlands", "jupiler", "belgium", "super-lig", "turkey",
     "austria", "austrian", "swiss", "switzerland", "denmark", "superliga"
 ]
 
-# Campionati domestici singoli disponibili (Serie A esclusa dai singoli)
+# Campionati domestici singoli disponibili (Serie A rimossa dai tornei singoli)
 DOMESTIC_LEAGUES_MAP = {
     "Premier League": "premier-league",
     "LaLiga EA Sports": "laliga",
@@ -48,30 +48,32 @@ DOMESTIC_LEAGUES_MAP = {
     "MLS": "mls"
 }
 
-# Club partecipanti a UEFA Champions League
-UCL_CLUBS = [
+# Club partecipanti a UEFA Champions League (Stagione 2026/27)
+UCL_CLUBS_2026_27 = [
     "manchester city", "arsenal", "liverpool", "aston villa",
-    "real madrid", "barcelona", "atlético", "atletico", "girona",
-    "inter", "milan", "juventus", "atalanta", "bologna",
-    "bayern", "leverkusen", "dortmund", "leipzig", "stuttgart",
-    "paris saint-germain", "psg", "monaco", "brest", "lille",
-    "sporting cp", "benfica", "porto", "feyenoord", "psv",
-    "celtic", "club brugge", "shakhtar", "dinamo zagreb", "salzburg", "young boys", "crvena zvezda", "sparta praha", "sturm graz"
+    "real madrid", "barcelona", "atlético", "atletico", "girona", "villarreal", "real betis",
+    "inter", "inter milan", "napoli", "atalanta", "bologna", "como",
+    "bayern", "bayern munchen", "borussia dortmund", "dortmund", "leipzig", "stuttgart",
+    "paris saint-germain", "psg", "monaco", "brest", "lille", "lens",
+    "sporting cp", "sporting", "psv", "feyenoord",
+    "club brugge", "shakhtar", "dinamo zagreb", "salzburg", "young boys",
+    "crvena zvezda", "sparta praha", "slavia", "slavia praha", "sturm graz", "bodo", "bodo/glimt",
+    "galatasaray", "fenerbahce", "aek athens", "slovan bratislava", "sabah", "lask"
 ]
 
-# Club partecipanti a UEFA Europa & Conference League
-UEL_UECL_CLUBS = [
-    "manchester united", "tottenham", "chelsea",
-    "roma", "lazio", "fiorentina",
-    "real sociedad", "athletic club", "real betis",
-    "frankfurt", "hoffenheim", "heidenheim",
-    "nice", "lyon", "lens",
-    "braga", "vitória", "guimaraes",
-    "ajax", "twente", "alkmaar", "az",
+# Club partecipanti a UEFA Europa League & Conference League (Stagione 2026/27)
+UEL_UECL_CLUBS_2026_27 = [
+    "benfica", "sl benfica", "porto", "fc porto", "braga", "vitoria", "guimaraes", "torreense",
+    "milan", "ac milan", "juventus", "roma", "lazio", "fiorentina",
+    "manchester united", "tottenham", "chelsea", "bournemouth", "crystal palace", "sunderland",
+    "real sociedad", "athletic club", "celta vigo",
+    "bayer leverkusen", "leverkusen", "hoffenheim", "heidenheim",
+    "marseille", "olympique lyonnais", "lyon", "nice", "rennes",
+    "ajax", "az alkmaar", "alkmaar", "twente", "nec nijmegen", "nec",
     "anderlecht", "union saint-gilloise", "gent", "cercle brugge",
-    "rangers", "heart", "hearts", "aberdeen",
-    "galatasaray", "fenerbahce", "besiktas", "basaksehir",
-    "olympiacos", "paok", "panathinaikos", "slavia praha", "viktoria plzen", "bodo/glimt", "malmo"
+    "celtic", "rangers", "heart", "hearts", "aberdeen",
+    "besiktas", "basaksehir", "olympiakos", "paok", "panathinaikos", "viktoria plzen",
+    "lech poznan", "jagiellonia", "ferencvaros", "omonoia", "celje", "hapoel"
 ]
 
 HOT_STREAK_STEPS = [320, 360, 380, 420, 440, 470, 550]
@@ -156,7 +158,7 @@ def fetch_gallery_data(raw_slug):
             nodes = cards_connection.get("nodes", []) if isinstance(cards_connection, dict) else []
             
             for card in nodes:
-                # FILTRO RIGIDO: SOLO LIMITED
+                # FILTRO RIGIDO: SOLO CARTE LIMITED
                 rarity = str(card.get("rarityTyped", "")).lower()
                 if rarity != "limited":
                     continue
@@ -178,7 +180,6 @@ def fetch_gallery_data(raw_slug):
                 floor_idx = round(mean_l5 * 0.8, 1)
                 ceiling_idx = round(mean_l5 * 1.35, 1)
 
-                # Priorità alla posizione stampata su questa specifica carta (es. Olise ATT)
                 card_pos = card.get("positionTyped")
                 if not card_pos:
                     card_pos = player.get("position", "")
@@ -275,36 +276,35 @@ comp_type = st.sidebar.selectbox(
 selected_competition = ""
 single_league_choice = ""
 
+# Classic = SO7 (7 Titolari), In-Season = SO5 (5 Titolari)
 if comp_type == "Champion Europe (Top 5 Leghe)":
-    sub_format = st.sidebar.radio("Formato Champion", ["Classic SO7", "In-Season SO5", "Classic SO5"])
+    sub_format = st.sidebar.radio("Formato Champion", ["Classic SO7", "In-Season SO5"])
     selected_competition = f"Champion Europe ({sub_format})"
 elif comp_type == "Challenger Europe":
-    sub_format = st.sidebar.radio("Formato Challenger", ["Classic SO7", "In-Season SO5", "Classic SO5"])
+    sub_format = st.sidebar.radio("Formato Challenger", ["Classic SO7", "In-Season SO5"])
     selected_competition = f"Challenger Europe ({sub_format})"
 elif comp_type == "UEFA Champions League":
-    sub_format = st.sidebar.radio("Formato UCL", ["In-Season SO5", "Classic SO5"])
+    sub_format = st.sidebar.radio("Formato UCL", ["Classic SO7", "In-Season SO5"])
     selected_competition = f"UEFA Champions League ({sub_format})"
 elif comp_type == "UEFA Europa & Conference League":
-    sub_format = st.sidebar.radio("Formato UEL/UECL", ["In-Season SO5", "Classic SO5"])
+    sub_format = st.sidebar.radio("Formato UEL/UECL", ["Classic SO7", "In-Season SO5"])
     selected_competition = f"UEFA Europa & Conference League ({sub_format})"
 elif comp_type == "Campionato Singolo Domestico":
     single_league_choice = st.sidebar.selectbox("Scegli Campionato", list(DOMESTIC_LEAGUES_MAP.keys()), index=0)
-    selected_competition = f"{single_league_choice}"
+    selected_competition = f"{single_league_choice} (In-Season SO5)"
 else:
-    selected_competition = "All-Star (Tutti i campionati)"
+    selected_competition = "All-Star (Classic SO7)"
 
 if st.sidebar.button("🗑️ Sblocca Formazioni"):
     st.session_state["locked_cards"] = set()
     st.session_state["saved_lineups"] = {}
     st.rerun()
 
-# Riconoscimento Top 5 sicuro ed esente da falsi positivi
+# Riconoscimento Top 5 escludendo rigorosamente il Brasile e seconde divisioni
 def check_is_top_5(row):
     text = row["league_text"]
-    # Se fa parte di leghe escluse (Scozia, 2. Bundesliga, Austria, ecc.), scartala subito da Champion
     if any(exc in text for exc in EXCLUDED_PATTERNS):
         return False
-    # Accetta solo se è Premier, LaLiga, Serie A, 1. Bundesliga, Ligue 1
     return any(p in text for p in TOP_5_PATTERNS)
 
 def filter_eligible_cards(data, main_cat, comp_name, single_choice, exclude_locked=True):
@@ -318,27 +318,27 @@ def filter_eligible_cards(data, main_cat, comp_name, single_choice, exclude_lock
             temp = temp[temp["is_in_season"]]
 
     elif main_cat == "Challenger Europe":
-        # Campionati europei esclusi dalla Top 5 (Scozia, Portogallo, Olanda, Belgio, Turchia, Austria, ecc.)
         temp = temp[~temp.apply(check_is_top_5, axis=1)]
         temp = temp[temp["league_text"].apply(lambda s: any(k in s for k in CHALLENGER_PATTERNS))]
         if "In-Season" in comp_name:
             temp = temp[temp["is_in_season"]]
 
     elif main_cat == "UEFA Champions League":
-        pattern = "|".join(UCL_CLUBS)
+        # Esclude espressamente il Benfica (che gioca in Europa League)
+        temp = temp[~temp["club_lower"].str.contains("benfica", na=False)]
+        pattern = "|".join(UCL_CLUBS_2026_27)
         temp = temp[temp["club_lower"].str.contains(pattern, na=False)]
         if "In-Season" in comp_name:
             temp = temp[temp["is_in_season"]]
 
     elif main_cat == "UEFA Europa & Conference League":
-        pattern = "|".join(UEL_UECL_CLUBS)
+        pattern = "|".join(UEL_UECL_CLUBS_2026_27)
         temp = temp[temp["club_lower"].str.contains(pattern, na=False)]
         if "In-Season" in comp_name:
             temp = temp[temp["is_in_season"]]
 
     elif main_cat == "Campionato Singolo Domestico":
         if single_choice == "Premier League":
-            # Solo Premier League inglese (escludendo categoricamente Scozia e Championship)
             temp = temp[temp["league_text"].str.contains("premier", na=False) & ~temp["league_text"].str.contains("scotland|premiership|spfl|scottish", na=False)]
         elif single_choice == "Bundesliga (1. Divisione)":
             temp = temp[temp["league_text"].str.contains("bundesliga", na=False) & ~temp["league_text"].str.contains("bundesliga-2|2-bundesliga|2. bundesliga|austria", na=False)]
@@ -371,9 +371,9 @@ with tab_builder:
     st.subheader(f"Composizione: {selected_competition}")
     
     is_so7 = ("SO7" in selected_competition)
-    slots_needed = ["GK", "DEF", "MID", "FWD", "EXTRA"] if not is_so7 else ["GK", "DEF 1", "DEF 2", "MID 1", "MID 2", "FWD", "EXTRA"]
+    slots_needed = ["GK", "DEF 1", "DEF 2", "MID 1", "MID 2", "FWD", "EXTRA"] if is_so7 else ["GK", "DEF", "MID", "FWD", "EXTRA"]
     
-    st.caption(f"Carte Limited disponibili per questa competizione: **{len(eligible_df)}**")
+    st.caption(f"Formato: **{'SO7 (7 Titolari Classic)' if is_so7 else 'SO5 (Min 4 In-Season + Max 1 Classic)'}** — Carte Limited disponibili: **{len(eligible_df)}**")
     
     if eligible_df.empty:
         st.warning("Nessuna carta Limited corrisponde ai criteri di questa specifica competizione.")
@@ -421,7 +421,7 @@ with tab_builder:
             active_lineup = [c for c in selected_cards.values() if c is not None]
             
             if len(active_lineup) == len(slots_needed):
-                if "In-Season" in selected_competition:
+                if not is_so7:
                     in_season_count = sum(1 for c in active_lineup if c["is_in_season"])
                     if in_season_count < 4:
                         st.error(f"⚠️ Servono almeno 4 carte In-Season! (Attuali: {in_season_count})")
