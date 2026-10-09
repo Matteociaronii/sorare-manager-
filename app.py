@@ -112,6 +112,11 @@ def fetch_gallery_data(raw_slug):
             nodes = cards_connection.get("nodes", []) if isinstance(cards_connection, dict) else []
             
             for card in nodes:
+                # FILTRO ESCLUSIVO LIMITED: scarta comuni o altre rarità non richieste
+                rarity = str(card.get("rarityTyped", "")).lower()
+                if rarity != "limited":
+                    continue
+
                 player = card.get("player")
                 if not player:
                     continue
@@ -138,7 +143,7 @@ def fetch_gallery_data(raw_slug):
                     "player_slug": player.get("slug"),
                     "name": player.get("displayName"),
                     "position": raw_pos,
-                    "rarity": card.get("rarityTyped", "limited"),
+                    "rarity": "Limited",
                     "season_year": card_year,
                     "is_in_season": is_in_season,
                     "multiplier": card_multiplier,
@@ -181,11 +186,11 @@ if st.sidebar.button("🔄 Sincronizza Dati GW"):
     st.session_state["saved_lineups"] = {}
     st.sidebar.success("Cache aggiornata!")
 
-with st.spinner("Scaricamento della tua galleria Sorare..."):
+with st.spinner("Scaricamento delle tue carte Limited..."):
     df = fetch_gallery_data(user_input)
 
 if df.empty:
-    st.warning("Nessuna carta trovata per questo account. Verifica lo username nella barra laterale.")
+    st.warning("Nessuna carta Limited trovata per questo account. Verifica lo username nella barra laterale.")
     st.stop()
 
 st.sidebar.divider()
@@ -236,7 +241,7 @@ if st.sidebar.button("🗑️ Sblocca Formazioni"):
     st.session_state["saved_lineups"] = {}
     st.rerun()
 
-# Logica di filtraggio avanzata e tollerante
+# Logica di filtraggio tollerante
 def filter_eligible_cards(data, main_cat, comp_name, single_choice, exclude_locked=True):
     temp = data.copy()
     if exclude_locked:
@@ -266,7 +271,7 @@ def filter_eligible_cards(data, main_cat, comp_name, single_choice, exclude_lock
 
 eligible_df = filter_eligible_cards(df, comp_type, selected_competition, single_league_choice)
 
-tab_builder, tab_h2h, tab_gallery = st.tabs(["🏆 Builder Formazione", "⚔️ Head-to-Head (1v1)", "📊 Rosa Completa"])
+tab_builder, tab_h2h, tab_gallery = st.tabs(["🏆 Builder Formazione", "⚔️ Head-to-Head (1v1)", "📊 Rosa Limited"])
 
 # --- TAB 1: BUILDER ---
 with tab_builder:
@@ -275,10 +280,10 @@ with tab_builder:
     is_so7 = ("SO7" in selected_competition)
     slots_needed = ["GK", "DEF", "MID", "FWD", "EXTRA"] if not is_so7 else ["GK", "DEF 1", "DEF 2", "MID 1", "MID 2", "FWD", "EXTRA"]
     
-    st.caption(f"Carte disponibili per questa competizione: **{len(eligible_df)}**")
+    st.caption(f"Carte Limited disponibili per questa competizione: **{len(eligible_df)}**")
     
     if eligible_df.empty:
-        st.warning("Nessun giocatore della tua rosa corrisponde ai criteri di questa specifica competizione. Prova a selezionare un'altra lega o il formato Classic.")
+        st.warning("Nessuna carta Limited corrisponde ai criteri di questa specifica competizione. Prova a selezionare un'altra lega o il formato Classic.")
     else:
         col_layout, col_stats = st.columns([3, 2])
         
@@ -305,7 +310,7 @@ with tab_builder:
                 candidates = candidates[~candidates["card_slug"].isin(already_chosen)]
                 
                 options_dict = {
-                    f"{row['name']} ({row['club_name']}) - {'🟢 In-S' if row['is_in_season'] else '⚪ Classic'} - Presenze L5: {row['l5_apps']}/5": row['card_slug']
+                    f"{row['name']} ({row['club_name']}) - {'🟢 In-S' if row['is_in_season'] else '⚪ Classic'} - L5 Apps: {row['l5_apps']}/5": row['card_slug']
                     for _, row in candidates.iterrows()
                 }
                 options_list = ["-- Vuoto --"] + list(options_dict.keys())
@@ -362,7 +367,7 @@ with tab_builder:
 
 # --- TAB 2: HEAD TO HEAD ---
 with tab_h2h:
-    st.subheader("⚔️ Confronto Diretto Ballottaggi")
+    st.subheader("⚔️ Confronto Diretto Ballottaggi (Solo Limited)")
     col1, col2 = st.columns(2)
     
     card_list = {f"{row['name']} ({row['club_name']} - {row['league_name']})": row['card_slug'] for _, row in df.iterrows()}
@@ -373,6 +378,7 @@ with tab_h2h:
             p1 = df[df["card_slug"] == card_list[c1_key]].iloc[0]
             st.markdown(f"### {p1['name']}")
             st.caption(f"Squadra: **{p1['club_name']}** ({p1['league_name']})")
+            st.write(f"• **Rarità:** 🟡 Limited")
             st.write(f"• **Stagione:** {'🟢 In-Season' if p1['is_in_season'] else '⚪ Classic'}")
             st.write(f"• **Moltiplicatore Totale:** x{p1['multiplier']:.2f}")
             st.write(f"• **Titolarità L5:** {p1['starter_rate']}% ({p1['l5_apps']}/5)")
@@ -384,6 +390,7 @@ with tab_h2h:
             p2 = df[df["card_slug"] == card_list[c2_key]].iloc[0]
             st.markdown(f"### {p2['name']}")
             st.caption(f"Squadra: **{p2['club_name']}** ({p2['league_name']})")
+            st.write(f"• **Rarità:** 🟡 Limited")
             st.write(f"• **Stagione:** {'🟢 In-Season' if p2['is_in_season'] else '⚪ Classic'}")
             st.write(f"• **Moltiplicatore Totale:** x{p2['multiplier']:.2f}")
             st.write(f"• **Titolarità L5:** {p2['starter_rate']}% ({p2['l5_apps']}/5)")
@@ -392,7 +399,7 @@ with tab_h2h:
 
 # --- TAB 3: ROSA GENERALE ---
 with tab_gallery:
-    st.subheader("📊 Tutte le Tue Carte Sorare")
+    st.subheader("📊 Rosa Ufficiale Limited")
     display_df = df[["name", "club_name", "league_name", "position", "is_in_season", "multiplier", "l5_avg", "floor_idx", "ceiling_idx", "card_slug"]].copy()
     display_df["is_in_season"] = display_df["is_in_season"].apply(lambda x: "In-Season (2026)" if x else "Classic")
     display_df["is_locked"] = display_df["card_slug"].apply(lambda x: "🔒 Schierato" if x in st.session_state["locked_cards"] else "🟢 Libero")
