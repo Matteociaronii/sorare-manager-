@@ -69,7 +69,7 @@ UEL_UECL_CLUBS_2026_27 = [
     "benfica", "sl benfica", "vitoria", "guimaraes",
     "milan", "ac milan", "juventus", "lazio", "atalanta", "bologna",
     "tottenham", "chelsea", "newcastle",
-    "real書籍", "real sociedad", "athletic club", "celta vigo",
+    "real sociedad", "athletic club", "celta vigo",
     "bayer leverkusen", "leverkusen", "frankfurt", "hoffenheim", "heidenheim",
     "marseille", "lyon", "olympique lyonnais", "nice", "monaco", "brest",
     "ajax", "az alkmaar", "alkmaar", "twente", "utrecht",
@@ -82,7 +82,7 @@ UEL_UECL_CLUBS_2026_27 = [
 
 HOT_STREAK_STEPS = [320, 360, 380, 420, 440, 470, 550]
 
-# Query GraphQL: estrazione del bonus totale ufficiale e dei livelli da Sorare
+# Query GraphQL corretta con 'bonuses'
 QUERY_USER_GALLERY = """
 query GetUserGalleryCards($slug: String!,$cursor: String) {
   user(slug: $slug) {
@@ -96,8 +96,12 @@ query GetUserGalleryCards($slug: String!,$cursor: String) {
         rarityTyped
         ... on Card {
           positionTyped
-          bonus
-          grade
+          bonuses {
+            total
+            level
+            collection
+            season
+          }
           season {
             startYear
           }
@@ -178,24 +182,25 @@ def fetch_gallery_data(raw_slug):
                 card_year = card.get("season", {}).get("startYear", 0)
                 is_in_season = (card_year == IN_SEASON_YEAR)
                 
-                # ESTRAZIONE BONUS TOTALE UFFICIALE SORARE (Livello + Collezione + In-Season)
-                raw_bonus = card.get("bonus")
-                grade = card.get("grade")
+                # ESTRAZIONE BONUS UFFICIALE TRAMITE IL CAMPO 'bonuses'
+                bonuses_obj = card.get("bonuses") or {}
+                raw_total = bonuses_obj.get("total")
                 
-                if raw_bonus is not None and isinstance(raw_bonus, (int, float)):
-                    # Sorare restituisce il moltiplicatore totale (es. 1.03 per +3%, o 0.03 come percentuale decimale)
-                    if raw_bonus >= 1.0:
-                        card_multiplier = float(raw_bonus)
+                if raw_total is not None and isinstance(raw_total, (int, float)):
+                    if raw_total >= 1.0:
+                        card_multiplier = float(raw_total)
                     else:
-                        card_multiplier = 1.0 + float(raw_bonus)
-                elif grade is not None and isinstance(grade, (int, float)):
-                    # Livello XP: per le Limited ogni livello dà tipicamente +0.5% (o +1%)
-                    xp_bonus = (float(grade) * 0.5) / 100.0
-                    season_bonus = 0.05 if is_in_season else 0.0
-                    card_multiplier = 1.0 + xp_bonus + season_bonus
+                        card_multiplier = 1.0 + float(raw_total)
                 else:
-                    season_bonus = 0.05 if is_in_season else 0.0
-                    card_multiplier = 1.0 + season_bonus
+                    level_b = float(bonuses_obj.get("level") or 0.0)
+                    collec_b = float(bonuses_obj.get("collection") or 0.0)
+                    season_b = float(bonuses_obj.get("season") or (0.05 if is_in_season else 0.0))
+                    
+                    sum_b = level_b + collec_b + season_b
+                    if sum_b >= 1.0:
+                        card_multiplier = sum_b
+                    else:
+                        card_multiplier = 1.0 + sum_b
 
                 bonus_percentage = round((card_multiplier - 1.0) * 100.0, 1)
 
@@ -419,7 +424,6 @@ with tab_builder:
                 already_chosen = [c["card_slug"] for c in selected_cards.values() if c is not None]
                 candidates = candidates[~candidates["card_slug"].isin(already_chosen)]
                 
-                # Etichetta unificata che riporta tutti i bonus reali attivi
                 options_dict = {
                     f"{row['name']} ({row['club_name']}) - {'🟢' if row['is_in_season'] else '⚪'} (+{row['bonus_pct']}%) - Ruolo: {row['position']} - L5: {row['l5_apps']}/5": row['card_slug']
                     for _, row in candidates.iterrows()
