@@ -82,7 +82,7 @@ HEADERS = {
     "Accept": "application/json"
 }
 
-# Estrazione diretta del bonus collezione dal tipo Card di Sorare
+# Query corretta: usa 'collection' (senza 'clubCollection') con batch a 12
 QUERY_USER_GALLERY = """
 query GetUserGalleryCards($slug: String!,$cursor: String) {
   user(slug: $slug) {
@@ -97,7 +97,7 @@ query GetUserGalleryCards($slug: String!,$cursor: String) {
         ... on Card {
           positionTyped
           grade
-          clubCollection {
+          collection {
             bonus
           }
           season {
@@ -192,14 +192,14 @@ def fetch_gallery_data(raw_slug):
                 club_n = str(active_club.get("name", "Svincolato"))
                 league_full_text = f"{l_name} {l_slug}".lower()
 
-                # 1. LIVELLO XP CARTA DA SORARE (1% per livello)
+                # 1. LIVELLO XP: 1% per livello esatto
                 level_bonus = float(grade_val) * 1.0
 
-                # 2. STAGIONALE (5% In-Season, 0% Classic)
+                # 2. STAGIONALE: 5% In-Season (2026), 0% Classic
                 season_bonus = 5.0 if is_in_season else 0.0
 
-                # 3. BONUS COLLEZIONE DIRETTO DAL SERVER SORARE
-                coll_node = card.get("clubCollection") or {}
+                # 3. BONUS COLLEZIONE DIRETTO DA SORARE
+                coll_node = card.get("collection") or {}
                 raw_b = coll_node.get("bonus")
                 collection_bonus = 0.0
                 if raw_b is not None and isinstance(raw_b, (int, float)):
