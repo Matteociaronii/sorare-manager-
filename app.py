@@ -32,33 +32,36 @@ DOMESTIC_LEAGUES = {
 TOP_5_LEAGUES = ["premier-league", "laliga-santander", "serie-a", "bundesliga", "ligue-1"]
 HOT_STREAK_STEPS = [320, 360, 380, 420, 440, 470, 550]
 
-# Query compatibile per utente Sorare
+# Query ufficiale Sorare Football
 QUERY_GALLERY = """
-query GetUserCards($slug: String!) {
+query GetUserGallery($slug: String!) {
   user(slug: $slug) {
-    nickname
+    id
     slug
-    cards {
-      slug
-      season {
-        startYear
-      }
-      rarity
-      xpBonus
-      player {
+    nickname
+    footballCards(first: 50) {
+      nodes {
         slug
-        displayName
-        position
-        activeClub {
+        rarity
+        xpBonus
+        season {
+          startYear
+        }
+        player {
           slug
-          name
-          domesticLeague {
+          displayName
+          position
+          activeClub {
             slug
             name
+            domesticLeague {
+              slug
+              name
+            }
           }
+          lastFiveSo5Scores
+          lastFifteenSo5Scores
         }
-        lastFiveSo5Scores
-        lastFifteenSo5Scores
       }
     }
   }
@@ -89,8 +92,9 @@ def fetch_gallery_data(raw_slug):
     user_slug = extract_slug(raw_slug)
     cards_data = []
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Content-Type": "application/json"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Content-Type": "application/json",
+        "Accept": "application/json"
     }
     
     try:
@@ -98,14 +102,20 @@ def fetch_gallery_data(raw_slug):
             API_URL,
             json={"query": QUERY_GALLERY, "variables": {"slug": user_slug}},
             headers=headers,
-            timeout=10
+            timeout=12
         )
-        if resp.status_code == 200:
-            resp_json = resp.json()
+        resp_json = resp.json()
+        
+        if resp.status_code != 200 or "errors" in resp_json:
+            err_msg = resp_json.get("errors", [{}])[0].get("message", f"Status {resp.status_code}")
+            st.sidebar.error(f"Dettaglio Sorare: {err_msg}")
+        else:
             user_node = resp_json.get("data", {}).get("user")
-            if user_node and "cards" in user_node:
-                raw_cards = user_node["cards"] or []
-                for card in raw_cards:
+            if user_node:
+                cards_conn = user_node.get("footballCards") or {}
+                nodes = cards_conn.get("nodes", []) if isinstance(cards_conn, dict) else []
+                
+                for card in nodes:
                     player = card.get("player")
                     if not player:
                         continue
@@ -147,12 +157,10 @@ def fetch_gallery_data(raw_slug):
                         "l5_scores": l5,
                         "l15_scores": l15
                     })
-    except Exception:
-        pass
+    except Exception as e:
+        st.sidebar.error(f"Errore connessione: {e}")
 
-    # Fallback su dati simulati pronti per testare l'hub se l'API Sorare non risponde
     if not cards_data:
-        st.sidebar.warning("⚠️ API Sorare temporaneamente non raggiungibile: caricate carte demo per testare subito l'hub.")
         cards_data = get_demo_cards()
 
     return pd.DataFrame(cards_data)
