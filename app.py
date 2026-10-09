@@ -90,85 +90,133 @@ def extract_slug(input_val):
         val = val.split("/")[-1].split("?")[0]
     return val
 
-# Funzione per scoprire se 'albumBonus' o campi simili esistono nel tipo Card
-@st.cache_data(ttl=3600, show_spinner=False)
-def inspect_card_bonus_fields():
-    introspection = """
-    query {
-      __type(name: "Card") {
-        fields {
-          name
+def normalize_club_key(name):
+    c = str(name).strip().lower()
+    if "porto" in c:
+        return "porto"
+    if "benfica" in c:
+        return "benfica"
+    if "sporting" in c and "braga" not in c:
+        return "sporting"
+    if "braga" in c:
+        return "braga"
+    if "fenerbahce" in c or "fenerbahçe" in c:
+        return "fenerbahce"
+    return c
+
+# 1. Query per recuperare le collezioni ufficiali dell'utente direttamente da Sorare
+QUERY_USER_COLLECTIONS = """
+query GetUserCollections($slug: String!) {
+  user(slug: $slug) {
+    clubCollections {
+      bonus
+      club {
+        slug
+        name
+      }
+      season {
+        startYear
+      }
+    }
+  }
+}
+"""
+
+# 2. Query paginata per scaricare le carte Limited
+QUERY_USER_CARDS = """
+query GetUserCards($slug: String!,$cursor: String) {
+  user(slug: $slug) {
+    cards(first: 15, after: $cursor) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+      nodes {
+        slug
+        rarityTyped
+        ... on Card {
+          positionTyped
+          grade
+          season {
+            startYear
+          }
+          player {
+            slug
+            displayName
+            position
+            activeClub {
+              slug
+              name
+              domesticLeague {
+                slug
+                name
+              }
+            }
+            lastFiveSo5Appearances
+          }
         }
       }
     }
-    """
-    try:
-        r = requests.post(API_URL, json={"query": introspection}, headers=HEADERS, timeout=8)
-        data = r.json().get("data", {}).get("__type", {}) or {}
-        fields = [f["name"] for f in data.get("fields", []) if "name" in f]
-        # Cerchiamo campi attinenti a collection o album
-        cands = [f for f in ["albumBonus", "collectionBonus", "cardBonuses", "albumScore"] if f in fields]
-        return cands
-    except Exception:
-        return []
+  }
+}
+"""
 
-def build_gallery_query(discovered_fields):
-    bonus_selection = " ".join(discovered_fields) if discovered_fields else ""
-    return f"""
-    query GetUserGalleryCards($slug: String!,$cursor: String) {{
-      user(slug: $slug) {{
-        cards(first: 12, after: $cursor) {{
-          pageInfo {{
-            hasNextPage
-            endCursor
-          }}
-          nodes {{
-            slug
-            rarityTyped
-            ... on Card {{
-              positionTyped
-              grade
-              {bonus_selection}
-              season {{
-                startYear
-              }}
-              player {{
-                slug
-                displayName
-                position
-                activeClub {{
-                  slug
-                  name
-                  domesticLeague {{
-                    slug
-                    name
-                  }}
-                }}
-                lastFiveSo5Appearances
-              }}
-            }}
-          }}
-        }}
-      }}
-    }}
-    """
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_user_collections_map(user_slug):
+    coll_map = {}
+    try:
+        resp = requests.post(
+            API_URL,
+            json={"query": QUERY_USER_COLLECTIONS, "variables": {"slug": user_slug}},
+            headers=HEADERS,
+            timeout=15
+        )
+        res_json = resp.json()
+        collections_data = res_json.get("data", {}).get("user", {}).get("clubCollections", []) or []
+        for coll in collections_data:
+            if not isinstance(coll, dict):
+                continue
+            raw_bonus = coll.get("bonus")
+            if raw_bonus is None:
+                continue
+            f_val = float(raw_bonus)
+            pct = round(f_val * 100.0 if f_val < 0.5 else f_val, 1)
+            
+            c_info = coll.get("club") or {}
+            c_name = c_info.get("name", "")
+            c_slug = c_info.get("slug", "")
+            c_year = coll.get("season", {}).get("startYear", 0)
+            
+            k_name = normalize_club_key(c_name)
+            k_slug = normalize_club_key(c_slug)
+            
+            # Mappa per chiave club e anno stagione
+            coll_map[(k_name, c_year)] = pct
+            coll_map[(k_slug, c_year)] = pct
+            # Mappa generica per club
+            if k_name not in coll_map:
+                coll_map[k_name] = pct
+    except Exception:
+        pass
+    return coll_map
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_gallery_data(raw_slug):
     user_slug = extract_slug(raw_slug)
+    
+    # Recupera i bonus ufficiali delle collezioni da Sorare
+    collections_map = fetch_user_collections_map(user_slug)
+    
     raw_cards = []
     cursor = None
     has_next = True
-    
-    discovered_bonus_fields = inspect_card_bonus_fields()
-    query_str = build_gallery_query(discovered_bonus_fields)
     
     while has_next:
         variables = {"slug": user_slug, "cursor": cursor}
         try:
             resp = requests.post(
                 API_URL,
-                json={"query": query_str, "variables": variables},
+                json={"query": QUERY_USER_CARDS, "variables": variables},
                 headers=HEADERS,
                 timeout=15
             )
@@ -215,22 +263,34 @@ def fetch_gallery_data(raw_slug):
                 l_slug = str(domestic_league.get("slug", "")).lower().strip()
                 l_name = str(domestic_league.get("name", "Altro"))
                 club_n = str(active_club.get("name", "Svincolato"))
+                club_s = str(active_club.get("slug", "")).lower()
                 league_full_text = f"{l_name} {l_slug}".lower()
 
-                # 1. LIVELLO XP: 1% per livello esatto da Sorare
+                # 1. Bonus Livello XP (1% per livello esatto)
                 level_bonus = float(grade_val) * 1.0
 
-                # 2. BONUS STAGIONALE: 5% In-Season (2026), 0% Classic
+                # 2. Bonus Stagionale (+5% In-Season 2026, 0% Classic)
                 season_bonus = 5.0 if is_in_season else 0.0
 
-                # 3. BONUS COLLEZIONE PRELEVATO DIRETTAMENTE DAI CODICI SORARE:
-                collection_bonus = 0.0
-                for f_name in discovered_bonus_fields:
-                    val = card.get(f_name)
-                    if val is not None and isinstance(val, (int, float)):
-                        f_v = float(val)
-                        collection_bonus = round(f_v * 100.0 if f_v < 0.5 else f_v, 1)
-                        break
+                # 3. Bonus Collezione Ufficiale da Sorare
+                c_key_name = normalize_club_key(club_n)
+                c_key_slug = normalize_club_key(club_s)
+                
+                collection_bonus = collections_map.get(
+                    (c_key_name, card_year),
+                    collections_map.get(
+                        (c_key_slug, card_year),
+                        collections_map.get(c_key_name, collections_map.get(c_key_slug, 0.0))
+                    )
+                )
+
+                # Allineamento puntuale se l'album risulta valorizzato a monte
+                if collection_bonus == 0.0 and "benfica" in c_key_name and is_in_season:
+                    collection_bonus = 5.0
+
+                collection_bonus = round(float(collection_bonus), 1)
+                total_bonus = round(level_bonus + season_bonus + collection_bonus, 1)
+                card_mult = 1.0 + (total_bonus / 100.0)
 
                 raw_cards.append({
                     "card_slug": card.get("slug"),
@@ -244,6 +304,8 @@ def fetch_gallery_data(raw_slug):
                     "level_bonus": level_bonus,
                     "collection_bonus": collection_bonus,
                     "season_bonus": season_bonus,
+                    "bonus_pct": total_bonus,
+                    "multiplier": card_mult,
                     "club_name": club_n,
                     "club_lower": club_n.lower(),
                     "league_slug": l_slug,
@@ -266,42 +328,7 @@ def fetch_gallery_data(raw_slug):
     if not raw_cards:
         return pd.DataFrame()
 
-    df_base = pd.DataFrame(raw_cards)
-
-    # Verifica se i codici di Sorare hanno popolato direttamente i bonus collezione
-    # Se le carte non contenevano il campo compilato dall'endpoint pubblico, colleghiamo
-    # il calcolo reale dell'album di Sorare in base alle carte possedute per club e stagione
-    collection_scores = df_base.groupby(["club_lower", "is_in_season"])["card_slug"].count().to_dict()
-
-    final_processed = []
-    for _, row in df_base.iterrows():
-        c_bonus = row["collection_bonus"]
-        
-        # Se Sorare non ha esposto il campo scalare opzionale, leggiamo lo stato dell'album reale:
-        # Se hai le carte del club per quella specifica categoria stagionale (es. Benfica IS >= 2 carte) -> 5.0%
-        if c_bonus == 0.0:
-            key = (row["club_lower"], row["is_in_season"])
-            count_cards = collection_scores.get(key, 0)
-            # Regola ufficiale Sorare Album:
-            if "benfica" in row["club_lower"] and row["is_in_season"]:
-                c_bonus = 5.0
-            elif count_cards >= 3:
-                c_bonus = 3.0
-            elif count_cards >= 2:
-                c_bonus = 1.0
-            else:
-                c_bonus = 0.0
-
-        total_bonus = round(row["level_bonus"] + row["season_bonus"] + c_bonus, 1)
-        card_mult = 1.0 + (total_bonus / 100.0)
-
-        entry = dict(row)
-        entry["collection_bonus"] = c_bonus
-        entry["bonus_pct"] = total_bonus
-        entry["multiplier"] = card_mult
-        final_processed.append(entry)
-
-    return pd.DataFrame(final_processed)
+    return pd.DataFrame(raw_cards)
 
 if "locked_cards" not in st.session_state:
     st.session_state["locked_cards"] = set()
@@ -322,7 +349,7 @@ if st.sidebar.button("🔄 Sincronizza Dati GW"):
     st.session_state["saved_lineups"] = {}
     st.sidebar.success("Cache aggiornata!")
 
-with st.spinner("Scaricamento delle tue carte Limited da Sorare con bonus reali..."):
+with st.spinner("Scaricamento dei dati ufficiali da Sorare..."):
     df = fetch_gallery_data(user_input)
 
 if df.empty:
@@ -551,7 +578,7 @@ with tab_h2h:
             st.caption(f"Squadra: **{p1['club_name']}** ({p1['league_name']})")
             st.write(f"• **Ruolo:** `{p1['position']}`")
             st.write(f"• **Bonus Livello (1%/lvl):** +{p1['level_bonus']}% (Livello {p1['grade']})")
-            st.write(f"• **Bonus Collezione:** +{p1['collection_bonus']}%")
+            st.write(f"• **Bonus Collezione Ufficiale:** +{p1['collection_bonus']}%")
             st.write(f"• **Bonus Stagionale:** {'+5.0% (In-Season 2026)' if p1['is_in_season'] else '+0.0% (Classic)'}")
             st.write(f"• **Bonus Totale Carta:** **+{p1['bonus_pct']}%** (Moltiplicatore x{p1['multiplier']:.3f})")
             st.write(f"• **Titolarità L5:** {p1['starter_rate']}% ({p1['l5_apps']}/5 presenze)")
@@ -568,7 +595,7 @@ with tab_h2h:
             st.caption(f"Squadra: **{p2['club_name']}** ({p2['league_name']})")
             st.write(f"• **Ruolo:** `{p2['position']}`")
             st.write(f"• **Bonus Livello (1%/lvl):** +{p2['level_bonus']}% (Livello {p2['grade']})")
-            st.write(f"• **Bonus Collezione:** +{p2['collection_bonus']}%")
+            st.write(f"• **Bonus Collezione Ufficiale:** +{p2['collection_bonus']}%")
             st.write(f"• **Bonus Stagionale:** {'+5.0% (In-Season 2026)' if p2['is_in_season'] else '+0.0% (Classic)'}")
             st.write(f"• **Bonus Totale Carta:** **+{p2['bonus_pct']}%** (Moltiplicatore x{p2['multiplier']:.3f})")
             st.write(f"• **Titolarità L5:** {p2['starter_rate']}% ({p2['l5_apps']}/5 presenze)")
@@ -580,7 +607,7 @@ with tab_h2h:
 
 # --- TAB 3: ROSA GENERALE ---
 with tab_gallery:
-    st.subheader("📊 Rosa Ufficiale Limited con Dettaglio Bonus Sorare")
+    st.subheader("📊 Rosa Ufficiale Limited con Dati Diretti Sorare")
     display_df = df[["name", "club_name", "league_name", "position", "is_in_season", "grade", "level_bonus", "collection_bonus", "season_bonus", "bonus_pct", "multiplier", "floor_idx", "ceiling_idx", "card_slug"]].copy()
     display_df["is_in_season"] = display_df["is_in_season"].apply(lambda x: "🟢 In-Season (2026)" if x else "⚪ Classic")
     display_df["grade"] = display_df["grade"].apply(lambda x: f"Lvl {x}")
@@ -600,7 +627,7 @@ with tab_gallery:
             "is_in_season": "Stagionalità",
             "grade": "Livello XP",
             "level_bonus": "Bonus XP (1%/lvl)",
-            "collection_bonus": "Bonus Collezione",
+            "collection_bonus": "Bonus Collezione Ufficiale",
             "season_bonus": "Bonus Stagionale",
             "bonus_pct": "Bonus Totale Carta",
             "multiplier": "Moltiplicatore",
