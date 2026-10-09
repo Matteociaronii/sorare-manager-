@@ -105,7 +105,6 @@ def normalize_club_name(name):
         return "Fenerbahçe"
     return clean
 
-# Query leggera e mirata per recuperare le carte della galleria
 QUERY_CARDS = """
 query GetUserCards($slug: String!,$cursor: String) {
   user(slug: $slug) {
@@ -175,7 +174,7 @@ def fetch_gallery_data(raw_slug):
             nodes = cards_connection.get("nodes", []) if isinstance(cards_connection, dict) else []
             
             for card in nodes:
-                # FILTRO RIGIDO: Solo Limited
+                # FILTRO RIGIDO: Esclusivamente Limited
                 rarity = str(card.get("rarityTyped", "")).lower()
                 if rarity != "limited":
                     continue
@@ -191,6 +190,10 @@ def fetch_gallery_data(raw_slug):
 
                 active_club_name = str(active_club.get("name", "Svincolato"))
                 card_club_name = normalize_club_name(active_club_name)
+
+                # Etichetta univoca dell'album della collezione:
+                # Esempio: "FC Porto - In-Season 2026" vs "FC Porto - Classic 2024"
+                album_label = f"{card_club_name} ({'In-Season 2026' if is_in_season else f'Classic {card_year}'})"
 
                 l5_apps = player.get("lastFiveSo5Appearances", 0) or 0
                 starter_rate = round(min(100.0, (l5_apps / 5.0) * 100.0), 1)
@@ -219,6 +222,7 @@ def fetch_gallery_data(raw_slug):
                     "is_in_season": is_in_season,
                     "club_name": card_club_name,
                     "club_lower": card_club_name.lower(),
+                    "album_label": album_label,
                     "league_slug": l_slug,
                     "league_name": l_name,
                     "league_text": league_full_text,
@@ -242,23 +246,23 @@ def fetch_gallery_data(raw_slug):
     df_base = pd.DataFrame(raw_cards)
 
     # =========================================================================
-    # MOTORE DI CALCOLO NATIVO DEL COLLECTION GAME DI SORARE (100% AUTOMATICO)
+    # CALCOLO SEPARATO PER OGNI SINGOLO ALBUM (CLUB + STAGIONE SPECIFICA)
     # =========================================================================
-    # Regolamento ufficiale Sorare:
-    # 1. Un album per ogni Club + Stagione (In-Season e Classic sono separati)
-    # 2. Ogni calciatore conta 1 sola volta per album (il duplicato non incrementa l'album)
-    # 3. Punteggio album calcolato in base alle carte uniche Limited possedute
-    unique_players_per_album = df_base.groupby(["club_name", "is_in_season"])["player_slug"].nunique().to_dict()
+    # L'album In-Season e l'album Classic della stessa squadra sono INDIPENDENTI:
+    unique_players_per_album = df_base.groupby("album_label")["player_slug"].nunique().to_dict()
 
     final_processed = []
     for _, row in df_base.iterrows():
+        a_label = row["album_label"]
         c_name = row["club_name"]
         is_in_s = row["is_in_season"]
-        unique_count = unique_players_per_album.get((c_name, is_in_s), 0)
+        unique_count = unique_players_per_album.get(a_label, 0)
 
-        # Calcolo del Collection Bonus secondo le soglie ufficiali Sorare:
+        # Regola di calcolo del Collection Bonus per questo specifico album:
+        # Se è l'album SL Benfica In-Season 2026 (completo al 5.0%):
         if "benfica" in c_name.lower() and is_in_s:
-            collection_bonus = 5.0  # Album Benfica In-Season completo (+5%)
+            collection_bonus = 5.0
+        # Per tutti gli altri album (Porto In-Season, Porto Classic, ecc.):
         elif unique_count >= 5:
             collection_bonus = 4.0
         elif unique_count >= 3:
@@ -268,10 +272,10 @@ def fetch_gallery_data(raw_slug):
         else:
             collection_bonus = 0.0
 
-        # Livello XP: 1% per livello esatto
+        # Livello XP reale da Sorare (1% per livello)
         level_bonus = float(row["grade"]) * 1.0
 
-        # Bonus Stagionale: +5% se In-Season (2026), 0% se Classic
+        # Bonus Stagionale (+5% In-Season 2026, 0% Classic)
         season_bonus = 5.0 if is_in_s else 0.0
 
         total_bonus = round(level_bonus + season_bonus + collection_bonus, 1)
@@ -306,7 +310,7 @@ if st.sidebar.button("🔄 Sincronizza Dati GW"):
     st.session_state["saved_lineups"] = {}
     st.sidebar.success("Dati aggiornati direttamente dal database Sorare!")
 
-with st.spinner("Sincronizzazione in tempo reale dal database Sorare..."):
+with st.spinner("Sincronizzazione della gallery Limited da Sorare..."):
     df = fetch_gallery_data(user_input)
 
 if df.empty:
@@ -533,6 +537,7 @@ with tab_h2h:
             p1 = df[df["card_slug"] == h2h_options[c1_key]].iloc[0]
             st.markdown(f"### {p1['name']}")
             st.caption(f"Squadra: **{p1['club_name']}** ({p1['league_name']})")
+            st.write(f"• **Album Collezione:** `{p1['album_label']}`")
             st.write(f"• **Ruolo:** `{p1['position']}`")
             st.write(f"• **Bonus Livello (1%/lvl):** +{p1['level_bonus']}% (Livello {p1['grade']})")
             st.write(f"• **Bonus Collezione Club:** +{p1['collection_bonus']}%")
@@ -550,6 +555,7 @@ with tab_h2h:
             p2 = df[df["card_slug"] == h2h_options[c2_key]].iloc[0]
             st.markdown(f"### {p2['name']}")
             st.caption(f"Squadra: **{p2['club_name']}** ({p2['league_name']})")
+            st.write(f"• **Album Collezione:** `{p2['album_label']}`")
             st.write(f"• **Ruolo:** `{p2['position']}`")
             st.write(f"• **Bonus Livello (1%/lvl):** +{p2['level_bonus']}% (Livello {p2['grade']})")
             st.write(f"• **Bonus Collezione Club:** +{p2['collection_bonus']}%")
@@ -565,7 +571,7 @@ with tab_h2h:
 # --- TAB 3: ROSA GENERALE ---
 with tab_gallery:
     st.subheader("📊 Rosa Ufficiale Limited (100% Automatica)")
-    display_df = df[["name", "club_name", "league_name", "position", "is_in_season", "grade", "level_bonus", "collection_bonus", "season_bonus", "bonus_pct", "multiplier", "floor_idx", "ceiling_idx", "card_slug"]].copy()
+    display_df = df[["name", "club_name", "album_label", "position", "is_in_season", "grade", "level_bonus", "collection_bonus", "season_bonus", "bonus_pct", "multiplier", "floor_idx", "ceiling_idx", "card_slug"]].copy()
     display_df["is_in_season"] = display_df["is_in_season"].apply(lambda x: "🟢 In-Season (2026)" if x else "⚪ Classic")
     display_df["grade"] = display_df["grade"].apply(lambda x: f"Lvl {x}")
     display_df["level_bonus"] = display_df["level_bonus"].apply(lambda x: f"+{x}%")
@@ -578,8 +584,8 @@ with tab_gallery:
         display_df,
         column_config={
             "name": "Calciatore",
-            "club_name": "Club Collezione",
-            "league_name": "Campionato",
+            "club_name": "Club",
+            "album_label": "Album Collezione",
             "position": "Ruolo",
             "is_in_season": "Stagionalità",
             "grade": "Livello XP",
