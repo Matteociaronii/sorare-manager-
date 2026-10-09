@@ -48,7 +48,7 @@ DOMESTIC_LEAGUES_MAP = {
     "MLS": "mls"
 }
 
-# 36 Club Ufficiali UEFA Champions League (Stagione 2026/27) - ESCLUSO BRAGA
+# 36 Club Ufficiali UEFA Champions League (Stagione 2026/27) - Include FC Porto
 UCL_CLUBS_2026_27 = [
     "porto", "fc porto", "futebol clube do porto",
     "manchester city", "arsenal", "liverpool", "aston villa", "manchester united",
@@ -82,8 +82,9 @@ UEL_UECL_CLUBS_2026_27 = [
 
 HOT_STREAK_STEPS = [320, 360, 380, 420, 440, 470, 550]
 
+# Query GraphQL snella e sicura che preleva anche il power/bonus totale della carta
 QUERY_USER_GALLERY = """
-query GetUserGalleryCards($slug: String!, $cursor: String) {
+query GetUserGalleryCards($slug: String!,$cursor: String) {
   user(slug: $slug) {
     cards(first: 20, after: $cursor) {
       pageInfo {
@@ -95,6 +96,7 @@ query GetUserGalleryCards($slug: String!, $cursor: String) {
         rarityTyped
         ... on Card {
           positionTyped
+          power
           season {
             startYear
           }
@@ -174,9 +176,24 @@ def fetch_gallery_data(raw_slug):
                 domestic_league = active_club.get("domesticLeague") or {}
                 card_year = card.get("season", {}).get("startYear", 0)
                 is_in_season = (card_year == IN_SEASON_YEAR)
-                season_bonus = 0.05 if is_in_season else 0.0
-                card_multiplier = 1.0 + season_bonus
                 
+                # CALCOLO BONUS EFFETTIVO DELLA CARTA (Livello + Collezione + In-Season)
+                # Sorare restituisce 'power' (es. 1.085 per +8.5%, oppure un valore decimale diretto)
+                raw_power = card.get("power")
+                if raw_power is not None and isinstance(raw_power, (int, float)):
+                    if raw_power > 2.0:
+                        card_multiplier = 1.0 + (raw_power / 100.0)
+                    elif raw_power >= 1.0:
+                        card_multiplier = float(raw_power)
+                    else:
+                        card_multiplier = 1.0 + float(raw_power)
+                else:
+                    # Fallback sicuro se power non è popolato: +5% se in season, 0% classic base
+                    season_bonus = 0.05 if is_in_season else 0.0
+                    card_multiplier = 1.0 + season_bonus
+
+                bonus_percentage = round((card_multiplier - 1.0) * 100.0, 1)
+
                 l5_apps = player.get("lastFiveSo5Appearances", 0) or 0
                 starter_rate = round(min(100.0, (l5_apps / 5.0) * 100.0), 1)
                 
@@ -202,6 +219,7 @@ def fetch_gallery_data(raw_slug):
                     "rarity": "Limited",
                     "season_year": card_year,
                     "is_in_season": is_in_season,
+                    "bonus_pct": bonus_percentage,
                     "multiplier": card_multiplier,
                     "club_name": club_n,
                     "club_lower": club_n.lower(),
@@ -243,7 +261,7 @@ if st.sidebar.button("🔄 Sincronizza Dati GW"):
     st.session_state["saved_lineups"] = {}
     st.sidebar.success("Cache aggiornata!")
 
-with st.spinner("Scaricamento delle tue carte Limited..."):
+with st.spinner("Scaricamento delle tue carte Limited con bonus attivi..."):
     df = fetch_gallery_data(user_input)
 
 if df.empty:
@@ -280,7 +298,6 @@ comp_type = st.sidebar.selectbox(
 selected_competition = ""
 single_league_choice = ""
 
-# Classic = SO7 (7 Titolari), In-Season = SO5 (5 Titolari, max 1 Classic permessa)
 if comp_type == "Champion Europe (Top 5 Leghe)":
     sub_format = st.sidebar.radio("Formato Champion", ["Classic SO7", "In-Season SO5"])
     selected_competition = f"Champion Europe ({sub_format})"
@@ -323,7 +340,6 @@ def filter_eligible_cards(data, main_cat, comp_name, single_choice, exclude_lock
         temp = temp[temp["league_text"].apply(lambda s: any(k in s for k in CHALLENGER_PATTERNS))]
 
     elif main_cat == "UEFA Champions League":
-        # ESCLUSIONE CATEGORICA: SC Braga e squadre di Europa League non possono entrare in Champions
         temp = temp[~temp["club_lower"].str.contains("braga|benfica|fiorentina", na=False)]
         pattern = "|".join(UCL_CLUBS_2026_27)
         temp = temp[temp["club_lower"].str.contains(pattern, na=False)]
@@ -356,8 +372,6 @@ def filter_eligible_cards(data, main_cat, comp_name, single_choice, exclude_lock
     elif main_cat == "All-Star (Tutti i campionati)":
         pass
         
-    # REGOLA SORARE: Nei tornei In-Season compare SIA In-Season CHE Classic (max 1 Classic permessa da regolamento)
-    # Nessun filtro distruttivo elimina le carte Classic dall'elenco!
     return temp
 
 eligible_df = filter_eligible_cards(df, comp_type, selected_competition, single_league_choice)
@@ -400,9 +414,9 @@ with tab_builder:
                 already_chosen = [c["card_slug"] for c in selected_cards.values() if c is not None]
                 candidates = candidates[~candidates["card_slug"].isin(already_chosen)]
                 
-                # Etichetta chiara se In-Season o Classic
+                # Etichetta unificata con pallino e bonus totale reale
                 options_dict = {
-                    f"{row['name']} ({row['club_name']}) - {'🟢 In-Season (+5%)' if row['is_in_season'] else '⚪ Classic'} - L5: {row['l5_apps']}/5": row['card_slug']
+                    f"{row['name']} ({row['club_name']}) - {'🟢' if row['is_in_season'] else '⚪'} (+{row['bonus_pct']}%) - Ruolo: {row['position']} - L5: {row['l5_apps']}/5": row['card_slug']
                     for _, row in candidates.iterrows()
                 }
                 options_list = ["-- Vuoto --"] + list(options_dict.keys())
@@ -416,11 +430,10 @@ with tab_builder:
                     selected_cards[slot] = None
                     
         with col_stats:
-            st.write("##### Monitoraggio Punteggi Attesi")
+            st.write("##### Monitoraggio Punteggi Attesi (Con Bonus Reali)")
             active_lineup = [c for c in selected_cards.values() if c is not None]
             
             if len(active_lineup) == len(slots_needed):
-                # Validazione rigorosa regole Sorare In-Season (Max 1 Classic)
                 if not is_so7:
                     classic_count = sum(1 for c in active_lineup if not c["is_in_season"])
                     in_season_count = sum(1 for c in active_lineup if c["is_in_season"])
@@ -430,7 +443,7 @@ with tab_builder:
                     else:
                         st.success(f"✅ Requisito In-Season rispettato ({in_season_count} In-Season, {classic_count} Classic).")
                 
-                cap_candidate = max(active_lineup, key=lambda x: x["ceiling_idx"])
+                cap_candidate = max(active_lineup, key=lambda x: x["ceiling_idx"] * x["multiplier"])
                 st.info(f"🎖️ **Capitano Consigliato (+50%):** {cap_candidate['name']}")
                 
                 tot_floor = 0
@@ -462,43 +475,52 @@ with tab_builder:
 
 # --- TAB 2: HEAD TO HEAD ---
 with tab_h2h:
-    st.subheader("⚔️ Confronto Diretto Ballottaggi (Solo Limited)")
+    st.subheader("⚔️ Confronto Diretto Ballottaggi (Tutte le Versioni)")
     col1, col2 = st.columns(2)
     
-    card_list = {f"{row['name']} ({row['club_name']} - {row['league_name']})": row['card_slug'] for _, row in df.iterrows()}
+    # Stessa interfaccia grafica usata nel builder per selezionare qualsiasi versione
+    h2h_options = {
+        f"{row['name']} ({row['club_name']}) - {'🟢 In-S' if row['is_in_season'] else '⚪ Classic'} (+{row['bonus_pct']}%) - {row['position']} - L5: {row['l5_apps']}/5 [id:{row['card_slug'][-6:]}]": row['card_slug']
+        for _, row in df.iterrows()
+    }
     
-    if card_list:
+    if h2h_options:
         with col1:
-            c1_key = st.selectbox("Seleziona Carta A", list(card_list.keys()), index=0)
-            p1 = df[df["card_slug"] == card_list[c1_key]].iloc[0]
+            c1_key = st.selectbox("Seleziona Carta A", list(h2h_options.keys()), index=0)
+            p1 = df[df["card_slug"] == h2h_options[c1_key]].iloc[0]
             st.markdown(f"### {p1['name']}")
             st.caption(f"Squadra: **{p1['club_name']}** ({p1['league_name']})")
-            st.write(f"• **Ruolo Carta:** {p1['position']}")
-            st.write(f"• **Rarità:** 🟡 Limited")
-            st.write(f"• **Stagione:** {'🟢 In-Season (+5%)' if p1['is_in_season'] else '⚪ Classic'}")
-            st.write(f"• **Moltiplicatore Totale:** x{p1['multiplier']:.2f}")
-            st.write(f"• **Titolarità L5:** {p1['starter_rate']}% ({p1['l5_apps']}/5)")
-            st.metric("Floor Index", f"{p1['floor_idx']} pt")
-            st.metric("Ceiling Index", f"{p1['ceiling_idx']} pt")
+            st.write(f"• **Ruolo:** `{p1['position']}`")
+            st.write(f"• **Stagionalità:** {'🟢 In-Season (2026)' if p1['is_in_season'] else '⚪ Classic'}")
+            st.write(f"• **Bonus Totale Carta:** **+{p1['bonus_pct']}%** (Moltiplicatore x{p1['multiplier']:.3f})")
+            st.write(f"• **Titolarità L5:** {p1['starter_rate']}% ({p1['l5_apps']}/5 presenze)")
+            
+            p1_floor = round(p1['floor_idx'] * p1['multiplier'], 1)
+            p1_ceil = round(p1['ceiling_idx'] * p1['multiplier'], 1)
+            st.metric("Floor Effettivo (Con Bonus)", f"{p1_floor} pt")
+            st.metric("Ceiling Effettivo (Con Bonus)", f"{p1_ceil} pt")
 
         with col2:
-            c2_key = st.selectbox("Seleziona Carta B", list(card_list.keys()), index=min(1, len(card_list)-1))
-            p2 = df[df["card_slug"] == card_list[c2_key]].iloc[0]
+            c2_key = st.selectbox("Seleziona Carta B", list(h2h_options.keys()), index=min(1, len(h2h_options)-1))
+            p2 = df[df["card_slug"] == h2h_options[c2_key]].iloc[0]
             st.markdown(f"### {p2['name']}")
             st.caption(f"Squadra: **{p2['club_name']}** ({p2['league_name']})")
-            st.write(f"• **Ruolo Carta:** {p2['position']}")
-            st.write(f"• **Rarità:** 🟡 Limited")
-            st.write(f"• **Stagione:** {'🟢 In-Season (+5%)' if p2['is_in_season'] else '⚪ Classic'}")
-            st.write(f"• **Moltiplicatore Totale:** x{p2['multiplier']:.2f}")
-            st.write(f"• **Titolarità L5:** {p2['starter_rate']}% ({p2['l5_apps']}/5)")
-            st.metric("Floor Index", f"{p2['floor_idx']} pt")
-            st.metric("Ceiling Index", f"{p2['ceiling_idx']} pt")
+            st.write(f"• **Ruolo:** `{p2['position']}`")
+            st.write(f"• **Stagionalità:** {'🟢 In-Season (2026)' if p2['is_in_season'] else '⚪ Classic'}")
+            st.write(f"• **Bonus Totale Carta:** **+{p2['bonus_pct']}%** (Moltiplicatore x{p2['multiplier']:.3f})")
+            st.write(f"• **Titolarità L5:** {p2['starter_rate']}% ({p2['l5_apps']}/5 presenze)")
+            
+            p2_floor = round(p2['floor_idx'] * p2['multiplier'], 1)
+            p2_ceil = round(p2['ceiling_idx'] * p2['multiplier'], 1)
+            st.metric("Floor Effettivo (Con Bonus)", f"{p2_floor} pt")
+            st.metric("Ceiling Effettivo (Con Bonus)", f"{p2_ceil} pt")
 
 # --- TAB 3: ROSA GENERALE ---
 with tab_gallery:
-    st.subheader("📊 Rosa Ufficiale Limited")
-    display_df = df[["name", "club_name", "league_name", "position", "is_in_season", "multiplier", "l5_avg", "floor_idx", "ceiling_idx", "card_slug"]].copy()
-    display_df["is_in_season"] = display_df["is_in_season"].apply(lambda x: "In-Season (2026)" if x else "Classic")
+    st.subheader("📊 Rosa Ufficiale Limited con Bonus Reali")
+    display_df = df[["name", "club_name", "league_name", "position", "is_in_season", "bonus_pct", "multiplier", "floor_idx", "ceiling_idx", "card_slug"]].copy()
+    display_df["is_in_season"] = display_df["is_in_season"].apply(lambda x: "🟢 In-Season (2026)" if x else "⚪ Classic")
+    display_df["bonus_pct"] = display_df["bonus_pct"].apply(lambda x: f"+{x}%")
     display_df["is_locked"] = display_df["card_slug"].apply(lambda x: "🔒 Schierato" if x in st.session_state["locked_cards"] else "🟢 Libero")
     
     st.dataframe(
@@ -507,12 +529,12 @@ with tab_gallery:
             "name": "Calciatore",
             "club_name": "Club Attuale",
             "league_name": "Campionato",
-            "position": "Ruolo Carta",
+            "position": "Ruolo",
             "is_in_season": "Stagionalità",
+            "bonus_pct": "Bonus Carta",
             "multiplier": "Moltiplicatore",
-            "l5_avg": "Media L5",
-            "floor_idx": "Floor",
-            "ceiling_idx": "Ceiling",
+            "floor_idx": "Floor Base",
+            "ceiling_idx": "Ceiling Base",
             "is_locked": "Stato GW"
         },
         use_container_width=True,
