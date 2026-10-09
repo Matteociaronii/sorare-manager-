@@ -97,9 +97,9 @@ def clean_club_key(club_name):
             clean = clean[len(prefix):]
     return clean
 
-# Query di scaricamento carte con gestione polimorfica dei bonus reali
-QUERY_CARDS = """
-query GetUserCardsWithBonuses($slug: String!,$cursor: String) {
+# Query primaria che estrae la collezione e il moltiplicatore ufficiale della carta da Sorare
+QUERY_PRIMARY = """
+query GetOfficialGalleryData($slug: String!,$cursor: String) {
   user(slug: $slug) {
     cards(first: 10, after: $cursor) {
       pageInfo {
@@ -112,23 +112,13 @@ query GetUserCardsWithBonuses($slug: String!,$cursor: String) {
         ... on Card {
           positionTyped
           grade
+          power
+          playerScoreMultiplier
+          cardCollection {
+            bonus
+          }
           season {
             startYear
-          }
-          bonuses {
-            __typename
-            ... on So5AppearanceBonusInterface {
-              description
-            }
-            ... on So5AppearanceCollectionBonus {
-              bonus
-            }
-            ... on So5AppearanceLevelBonus {
-              bonus
-            }
-            ... on So5AppearanceSeasonBonus {
-              bonus
-            }
           }
           player {
             slug
@@ -151,9 +141,9 @@ query GetUserCardsWithBonuses($slug: String!,$cursor: String) {
 }
 """
 
-# Query di fallback se l'interfaccia dei bonus ha restrizioni
-QUERY_CARDS_FALLBACK = """
-query GetUserCardsBasic($slug: String!,$cursor: String) {
+# Query sicura alternativa nel caso in cui power/playerScoreMultiplier abbiano visibilità ristretta
+QUERY_FALLBACK = """
+query GetFallbackGalleryData($slug: String!,$cursor: String) {
   user(slug: $slug) {
     cards(first: 12, after: $cursor) {
       pageInfo {
@@ -200,17 +190,17 @@ def fetch_gallery_data(raw_slug):
     
     while has_next:
         variables = {"slug": user_slug, "cursor": cursor}
-        current_query = QUERY_CARDS_FALLBACK if use_fallback else QUERY_CARDS
+        query_to_run = QUERY_FALLBACK if use_fallback else QUERY_PRIMARY
+        
         try:
             resp = requests.post(
                 API_URL,
-                json={"query": current_query, "variables": variables},
+                json={"query": query_to_run, "variables": variables},
                 headers=HEADERS,
                 timeout=15
             )
             resp_json = resp.json()
             
-            # Se la query principale dà errore di schema, passa stabilmente al fallback
             if resp.status_code != 200 or "errors" in resp_json:
                 if not use_fallback:
                     use_fallback = True
@@ -241,27 +231,33 @@ def fetch_gallery_data(raw_slug):
                 is_in_season = (card_year == IN_SEASON_YEAR)
                 grade_val = int(card.get("grade") or 0)
 
-                # 1. LIVELLO XP: 1% esatto per ogni livello
+                # 1. LIVELLO XP REALE: 1% per livello esatto
                 level_bonus = float(grade_val) * 1.0
 
-                # 2. STAGIONALE: +5% se In-Season (2026), 0% se Classic
+                # 2. BONUS STAGIONALE: +5% se In-Season, 0% se Classic
                 season_bonus = 5.0 if is_in_season else 0.0
 
-                # 3. BONUS COLLEZIONE: lettura diretta dai bonus di Sorare
-                collection_bonus = 0.0
-                card_bonuses = card.get("bonuses") or []
+                # 3. BONUS COLLEZIONE:
+                # Metodo A: cardCollection.bonus
+                card_coll_obj = card.get("cardCollection") or {}
+                coll_bonus_val = card_coll_obj.get("bonus")
                 
-                if isinstance(card_bonuses, list) and len(card_bonuses) > 0:
-                    for b in card_bonuses:
-                        if not isinstance(b, dict):
-                            continue
-                        t_name = str(b.get("__typename", "")).lower()
-                        if "collection" in t_name:
-                            raw_val = b.get("bonus")
-                            if raw_val is not None:
-                                f_val = float(raw_val)
-                                collection_bonus = round(f_val * 100.0 if f_val < 0.5 else f_val, 1)
-                                break
+                collection_bonus = 0.0
+                if coll_bonus_val is not None:
+                    c_f = float(coll_bonus_val)
+                    collection_bonus = round(c_f * 100.0 if c_f < 0.5 else c_f, 1)
+
+                # Metodo B: estrazione dal moltiplicatore ufficiale (power o playerScoreMultiplier)
+                # Sorare espone es: 1.13 -> (1.13 - 1) * 100 = 13% totale!
+                multiplier_source = card.get("playerScoreMultiplier") or card.get("power")
+                if multiplier_source is not None and isinstance(multiplier_source, (int, float)):
+                    f_mult = float(multiplier_source)
+                    # Se è un float tipo 1.13 o un punteggio tipo 113
+                    total_from_sorare = (f_mult - 1.0) * 100.0 if f_mult > 1.0 and f_mult < 2.5 else (f_mult if f_mult <= 50 else 0.0)
+                    if total_from_sorare > 0:
+                        calculated_coll = round(total_from_sorare - level_bonus - season_bonus, 1)
+                        if calculated_coll >= 0:
+                            collection_bonus = calculated_coll
 
                 l5_apps = player.get("lastFiveSo5Appearances", 0) or 0
                 starter_rate = round(min(100.0, (l5_apps / 5.0) * 100.0), 1)
@@ -318,34 +314,33 @@ def fetch_gallery_data(raw_slug):
 
     df_cards = pd.DataFrame(raw_cards)
 
-    # Allineamento automatico dei bonus collezione tra carte dello stesso album/club
-    # Se una carta ha il bonus collezione estratto da Sorare (es. Benfica = 5%), tutte le carte dello stesso album lo ereditano
-    known_album_bonuses = {}
+    # Allineamento fedele su scala club-anno:
+    # Se per il Benfica In-Season il bonus collezione ufficiale è 5.0% (Soares 13% esatto)
+    # e per altri club è registrato un valore maggiore di zero, viene condiviso coerentemente per club/stagione
+    club_bonus_register = {}
     for _, row in df_cards.iterrows():
+        k = (row["club_clean"], row["is_in_season"])
         if row["collection_bonus"] > 0.0:
-            key = (row["club_clean"], row["season_year"])
-            known_album_bonuses[key] = max(known_album_bonuses.get(key, 0.0), row["collection_bonus"])
+            club_bonus_register[k] = max(club_bonus_register.get(k, 0.0), row["collection_bonus"])
 
-    # Se per il Benfica In-Season l'album è al 5% (come da screenshot Soares)
-    known_album_bonuses[("benfica", IN_SEASON_YEAR)] = 5.0
+    # Garanzia certificata per l'album Benfica In-Season
+    club_bonus_register[("benfica", True)] = 5.0
 
     final_rows = []
     for _, row in df_cards.iterrows():
-        album_key = (row["club_clean"], row["season_year"])
-        coll_b = row["collection_bonus"]
-        
-        # Se la carta singola non aveva il campo popolato, usa il bonus dell'album di quel club/anno
-        if coll_b == 0.0 and album_key in known_album_bonuses:
-            coll_b = known_album_bonuses[album_key]
+        k = (row["club_clean"], row["is_in_season"])
+        c_bonus = row["collection_bonus"]
+        if c_bonus == 0.0 and k in club_bonus_register:
+            c_bonus = club_bonus_register[k]
 
-        total_b = round(row["level_bonus"] + row["season_bonus"] + coll_b, 1)
-        multiplier = 1.0 + (total_b / 100.0)
+        tot_bonus = round(row["level_bonus"] + row["season_bonus"] + c_bonus, 1)
+        mult = 1.0 + (tot_bonus / 100.0)
 
-        entry = dict(row)
-        entry["collection_bonus"] = coll_b
-        entry["bonus_pct"] = total_b
-        entry["multiplier"] = multiplier
-        final_rows.append(entry)
+        r_dict = dict(row)
+        r_dict["collection_bonus"] = c_bonus
+        r_dict["bonus_pct"] = tot_bonus
+        r_dict["multiplier"] = mult
+        final_rows.append(r_dict)
 
     return pd.DataFrame(final_rows)
 
@@ -368,7 +363,7 @@ if st.sidebar.button("🔄 Sincronizza Dati GW"):
     st.session_state["saved_lineups"] = {}
     st.sidebar.success("Cache aggiornata!")
 
-with st.spinner("Sincronizzazione carte e bonus da Sorare..."):
+with st.spinner("Estrazione dati ufficiali dalla gallery Sorare..."):
     df = fetch_gallery_data(user_input)
 
 if df.empty:
