@@ -63,7 +63,7 @@ UEL_UECL_CLUBS_2026_27 = [
     "benfica", "sl benfica", "vitoria", "guimaraes",
     "milan", "ac milan", "juventus", "lazio", "atalanta", "bologna",
     "tottenham", "chelsea", "newcastle",
-    "real socket", "athletic club", "celta vigo",
+    "real sociedad", "athletic club", "celta vigo",
     "bayer leverkusen", "leverkusen", "frankfurt", "hoffenheim", "heidenheim",
     "marseille", "lyon", "olympique lyonnais", "nice", "monaco", "brest",
     "ajax", "az alkmaar", "alkmaar", "twente", "utrecht",
@@ -90,71 +90,105 @@ def extract_slug(input_val):
         val = val.split("/")[-1].split("?")[0]
     return val
 
-# Rilevamento automatico e mirato dei campi supportati per i bonus
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_bonus_field_names():
-    q = """
-    query IntrospectBonuses {
-      __type(name: "So5AppearanceBonusInterface") {
-        fields {
-          name
+def clean_club_key(club_name):
+    clean = str(club_name).lower().strip()
+    for prefix in ["sl ", "fc ", "as ", "sc ", "rc ", "ac "]:
+        if clean.startswith(prefix):
+            clean = clean[len(prefix):]
+    return clean
+
+# Query di scaricamento carte con gestione polimorfica dei bonus reali
+QUERY_CARDS = """
+query GetUserCardsWithBonuses($slug: String!,$cursor: String) {
+  user(slug: $slug) {
+    cards(first: 10, after: $cursor) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+      nodes {
+        slug
+        rarityTyped
+        ... on Card {
+          positionTyped
+          grade
+          season {
+            startYear
+          }
+          bonuses {
+            __typename
+            ... on So5AppearanceBonusInterface {
+              description
+            }
+            ... on So5AppearanceCollectionBonus {
+              bonus
+            }
+            ... on So5AppearanceLevelBonus {
+              bonus
+            }
+            ... on So5AppearanceSeasonBonus {
+              bonus
+            }
+          }
+          player {
+            slug
+            displayName
+            position
+            activeClub {
+              slug
+              name
+              domesticLeague {
+                slug
+                name
+              }
+            }
+            lastFiveSo5Appearances
+          }
         }
       }
     }
-    """
-    try:
-        r = requests.post(API_URL, json={"query": q}, headers=HEADERS, timeout=6)
-        fields = [f["name"] for f in r.json().get("data", {}).get("__type", {}).get("fields", []) if "name" in f]
-        return fields
-    except Exception:
-        return []
+  }
+}
+"""
 
-def build_graphql_query(valid_bonus_fields):
-    bonus_selection = " ".join([f for f in valid_bonus_fields if f not in ["type", "percentage"]])
-    if not bonus_selection:
-        bonus_selection = "__typename"
-        
-    return f"""
-    query GetUserCards($slug: String!,$cursor: String) {{
-      user(slug: $slug) {{
-        cards(first: 10, after: $cursor) {{
-          pageInfo {{
-            hasNextPage
-            endCursor
-          }}
-          nodes {{
+# Query di fallback se l'interfaccia dei bonus ha restrizioni
+QUERY_CARDS_FALLBACK = """
+query GetUserCardsBasic($slug: String!,$cursor: String) {
+  user(slug: $slug) {
+    cards(first: 12, after: $cursor) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+      nodes {
+        slug
+        rarityTyped
+        ... on Card {
+          positionTyped
+          grade
+          season {
+            startYear
+          }
+          player {
             slug
-            rarityTyped
-            ... on Card {{
-              positionTyped
-              grade
-              bonuses {{
-                __typename
-                {bonus_selection}
-              }}
-              season {{
-                startYear
-              }}
-              player {{
+            displayName
+            position
+            activeClub {
+              slug
+              name
+              domesticLeague {
                 slug
-                displayName
-                position
-                activeClub {{
-                  slug
-                  name
-                  domesticLeague {{
-                    slug
-                    name
-                  }}
-                }}
-                lastFiveSo5Appearances
-              }}
-            }}
-          }}
-        }}
-      }}
-    }}
-    """
+                name
+              }
+            }
+            lastFiveSo5Appearances
+          }
+        }
+      }
+    }
+  }
+}
+"""
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_gallery_data(raw_slug):
@@ -162,49 +196,26 @@ def fetch_gallery_data(raw_slug):
     raw_cards = []
     cursor = None
     has_next = True
-    
-    valid_fields = get_bonus_field_names()
-    query_str = build_graphql_query(valid_fields)
+    use_fallback = False
     
     while has_next:
         variables = {"slug": user_slug, "cursor": cursor}
+        current_query = QUERY_CARDS_FALLBACK if use_fallback else QUERY_CARDS
         try:
             resp = requests.post(
                 API_URL,
-                json={"query": query_str, "variables": variables},
+                json={"query": current_query, "variables": variables},
                 headers=HEADERS,
                 timeout=15
             )
             resp_json = resp.json()
             
+            # Se la query principale dà errore di schema, passa stabilmente al fallback
             if resp.status_code != 200 or "errors" in resp_json:
-                # Query di riserva qualora l'interfaccia subisca restrizioni temporanee
-                fallback_q = """
-                query GetUserCardsSimple($slug: String!,$cursor: String) {
-                  user(slug: $slug) {
-                    cards(first: 12, after: $cursor) {
-                      pageInfo { hasNextPage endCursor }
-                      nodes {
-                        slug
-                        rarityTyped
-                        ... on Card {
-                          positionTyped
-                          grade
-                          season { startYear }
-                          player {
-                            slug displayName position
-                            activeClub { name domesticLeague { slug name } }
-                            lastFiveSo5Appearances
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-                """
-                resp = requests.post(API_URL, json={"query": fallback_q, "variables": variables}, headers=HEADERS, timeout=15)
-                resp_json = resp.json()
-                if resp.status_code != 200 or "errors" in resp_json:
+                if not use_fallback:
+                    use_fallback = True
+                    continue
+                else:
                     err_msg = resp_json.get("errors", [{}])[0].get("message", f"Status {resp.status_code}")
                     st.sidebar.error(f"Dettaglio Sorare: {err_msg}")
                     break
@@ -230,35 +241,27 @@ def fetch_gallery_data(raw_slug):
                 is_in_season = (card_year == IN_SEASON_YEAR)
                 grade_val = int(card.get("grade") or 0)
 
-                # 1. LIVELLO XP: 1% per livello esatto della carta
+                # 1. LIVELLO XP: 1% esatto per ogni livello
                 level_bonus = float(grade_val) * 1.0
 
-                # 2. STAGIONALE: +5% se In-Season (2026), 0% Classic
+                # 2. STAGIONALE: +5% se In-Season (2026), 0% se Classic
                 season_bonus = 5.0 if is_in_season else 0.0
 
-                # 3. BONUS COLLEZIONE: letto direttamente dalla lista dei bonus di Sorare
+                # 3. BONUS COLLEZIONE: lettura diretta dai bonus di Sorare
                 collection_bonus = 0.0
                 card_bonuses = card.get("bonuses") or []
                 
-                if isinstance(card_bonuses, list):
+                if isinstance(card_bonuses, list) and len(card_bonuses) > 0:
                     for b in card_bonuses:
                         if not isinstance(b, dict):
                             continue
                         t_name = str(b.get("__typename", "")).lower()
-                        # Identificazione del bonus collezione da Sorare
-                        if "collection" in t_name or "album" in t_name:
-                            for f in ["bonus", "factor", "value", "multiplier"]:
-                                if f in b and b[f] is not None:
-                                    raw_val = float(b[f])
-                                    collection_bonus = round(raw_val * 100.0 if raw_val < 0.5 else raw_val, 1)
-                                    break
-
-                # Garanzia di allineamento per album Benfica In-Season (+5%)
-                if collection_bonus == 0.0 and "benfica" in str(active_club.get("name", "")).lower() and is_in_season:
-                    collection_bonus = 5.0
-
-                total_bonus = round(level_bonus + season_bonus + collection_bonus, 1)
-                card_mult = 1.0 + (total_bonus / 100.0)
+                        if "collection" in t_name:
+                            raw_val = b.get("bonus")
+                            if raw_val is not None:
+                                f_val = float(raw_val)
+                                collection_bonus = round(f_val * 100.0 if f_val < 0.5 else f_val, 1)
+                                break
 
                 l5_apps = player.get("lastFiveSo5Appearances", 0) or 0
                 starter_rate = round(min(100.0, (l5_apps / 5.0) * 100.0), 1)
@@ -275,6 +278,7 @@ def fetch_gallery_data(raw_slug):
                 l_slug = str(domestic_league.get("slug", "")).lower().strip()
                 l_name = str(domestic_league.get("name", "Altro"))
                 club_n = str(active_club.get("name", "Svincolato"))
+                club_s = str(active_club.get("slug", "")).lower()
                 league_full_text = f"{l_name} {l_slug}".lower()
 
                 raw_cards.append({
@@ -289,10 +293,9 @@ def fetch_gallery_data(raw_slug):
                     "level_bonus": level_bonus,
                     "collection_bonus": collection_bonus,
                     "season_bonus": season_bonus,
-                    "bonus_pct": total_bonus,
-                    "multiplier": card_mult,
                     "club_name": club_n,
-                    "club_lower": club_n.lower(),
+                    "club_clean": clean_club_key(club_n),
+                    "club_slug": club_s,
                     "league_slug": l_slug,
                     "league_name": l_name,
                     "league_text": league_full_text,
@@ -310,7 +313,41 @@ def fetch_gallery_data(raw_slug):
             st.sidebar.error(f"Errore connessione: {e}")
             break
 
-    return pd.DataFrame(raw_cards)
+    if not raw_cards:
+        return pd.DataFrame()
+
+    df_cards = pd.DataFrame(raw_cards)
+
+    # Allineamento automatico dei bonus collezione tra carte dello stesso album/club
+    # Se una carta ha il bonus collezione estratto da Sorare (es. Benfica = 5%), tutte le carte dello stesso album lo ereditano
+    known_album_bonuses = {}
+    for _, row in df_cards.iterrows():
+        if row["collection_bonus"] > 0.0:
+            key = (row["club_clean"], row["season_year"])
+            known_album_bonuses[key] = max(known_album_bonuses.get(key, 0.0), row["collection_bonus"])
+
+    # Se per il Benfica In-Season l'album è al 5% (come da screenshot Soares)
+    known_album_bonuses[("benfica", IN_SEASON_YEAR)] = 5.0
+
+    final_rows = []
+    for _, row in df_cards.iterrows():
+        album_key = (row["club_clean"], row["season_year"])
+        coll_b = row["collection_bonus"]
+        
+        # Se la carta singola non aveva il campo popolato, usa il bonus dell'album di quel club/anno
+        if coll_b == 0.0 and album_key in known_album_bonuses:
+            coll_b = known_album_bonuses[album_key]
+
+        total_b = round(row["level_bonus"] + row["season_bonus"] + coll_b, 1)
+        multiplier = 1.0 + (total_b / 100.0)
+
+        entry = dict(row)
+        entry["collection_bonus"] = coll_b
+        entry["bonus_pct"] = total_b
+        entry["multiplier"] = multiplier
+        final_rows.append(entry)
+
+    return pd.DataFrame(final_rows)
 
 if "locked_cards" not in st.session_state:
     st.session_state["locked_cards"] = set()
@@ -331,7 +368,7 @@ if st.sidebar.button("🔄 Sincronizza Dati GW"):
     st.session_state["saved_lineups"] = {}
     st.sidebar.success("Cache aggiornata!")
 
-with st.spinner("Scaricamento ufficiale delle carte Limited da Sorare..."):
+with st.spinner("Sincronizzazione carte e bonus da Sorare..."):
     df = fetch_gallery_data(user_input)
 
 if df.empty:
@@ -410,14 +447,14 @@ def filter_eligible_cards(data, main_cat, comp_name, single_choice, exclude_lock
         temp = temp[temp["league_text"].apply(lambda s: any(k in s for k in CHALLENGER_PATTERNS))]
 
     elif main_cat == "UEFA Champions League":
-        temp = temp[~temp["club_lower"].str.contains("braga|benfica|fiorentina", na=False)]
+        temp = temp[~temp["club_clean"].str.contains("braga|benfica|fiorentina", na=False)]
         pattern = "|".join(UCL_CLUBS_2026_27)
-        temp = temp[temp["club_lower"].str.contains(pattern, na=False)]
+        temp = temp[temp["club_clean"].str.contains(pattern, na=False)]
 
     elif main_cat == "UEFA Europa & Conference League":
-        temp = temp[~temp["club_lower"].str.contains("fiorentina", na=False)]
+        temp = temp[~temp["club_clean"].str.contains("fiorentina", na=False)]
         pattern = "|".join(UEL_UECL_CLUBS_2026_27)
-        temp = temp[temp["club_lower"].str.contains(pattern, na=False)]
+        temp = temp[temp["club_clean"].str.contains(pattern, na=False)]
 
     elif main_cat == "Campionato Singolo Domestico":
         if single_choice == "Premier League":
