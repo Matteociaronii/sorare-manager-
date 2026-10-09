@@ -16,7 +16,7 @@ st.set_page_config(
 API_URL = "https://api.sorare.com/graphql"
 IN_SEASON_YEAR = 2026
 
-# Campionati domestici disponibili (Serie A rimossa dai tornei singoli)
+# Campionati domestici disponibili (Serie A rimossa dai soli tornei singoli)
 DOMESTIC_LEAGUES = {
     "premier-league": "Premier League",
     "laliga-santander": "LaLiga EA Sports",
@@ -32,7 +32,7 @@ DOMESTIC_LEAGUES = {
 TOP_5_LEAGUES = ["premier-league", "laliga-santander", "serie-a", "bundesliga", "ligue-1"]
 HOT_STREAK_STEPS = [320, 360, 380, 420, 440, 470, 550]
 
-# Query GraphQL corretta con i nodes per AnyCardInterfaceConnection
+# Query GraphQL precisa per AnyCardInterface
 QUERY_USER_GALLERY = """
 query GetUserGalleryCards($slug: String!) {
   user(slug: $slug) {
@@ -40,25 +40,27 @@ query GetUserGalleryCards($slug: String!) {
     cards {
       nodes {
         slug
-        rarity
-        xpBonus
-        season {
-          startYear
-        }
-        player {
-          slug
-          displayName
-          position
-          activeClub {
+        rarityTyped
+        ... on Card {
+          xpBonus
+          season {
+            startYear
+          }
+          player {
             slug
-            name
-            domesticLeague {
+            displayName
+            position
+            activeClub {
               slug
               name
+              domesticLeague {
+                slug
+                name
+              }
             }
+            lastFiveSo5Scores
+            lastFifteenSo5Scores
           }
-          lastFiveSo5Scores
-          lastFifteenSo5Scores
         }
       }
     }
@@ -135,7 +137,7 @@ def fetch_gallery_data(raw_slug):
                 "player_slug": player.get("slug"),
                 "name": player.get("displayName"),
                 "position": player.get("position"),
-                "rarity": card.get("rarity"),
+                "rarity": card.get("rarityTyped", "limited"),
                 "season_year": card_year,
                 "is_in_season": is_in_season,
                 "multiplier": card_multiplier,
@@ -178,7 +180,7 @@ with st.spinner("Scaricamento della tua galleria Sorare..."):
     df = fetch_gallery_data(user_input)
 
 if df.empty:
-    st.warning("Nessuna carta trovata per questo account o connessione in corso. Verifica lo username.")
+    st.warning("Nessuna carta trovata per questo account o recupero in corso. Se il caricamento fallisce, controlla il messaggio di errore nella barra laterale.")
     st.stop()
 
 st.sidebar.divider()
