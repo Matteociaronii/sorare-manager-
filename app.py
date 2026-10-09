@@ -82,11 +82,11 @@ HEADERS = {
     "Accept": "application/json"
 }
 
-# Query a bassa complessità (first: 10) conforme allo schema Sorare
+# Estrazione diretta del bonus collezione dal tipo Card di Sorare
 QUERY_USER_GALLERY = """
 query GetUserGalleryCards($slug: String!,$cursor: String) {
   user(slug: $slug) {
-    cards(first: 10, after: $cursor) {
+    cards(first: 12, after: $cursor) {
       pageInfo {
         hasNextPage
         endCursor
@@ -97,6 +97,9 @@ query GetUserGalleryCards($slug: String!,$cursor: String) {
         ... on Card {
           positionTyped
           grade
+          clubCollection {
+            bonus
+          }
           season {
             startYear
           }
@@ -189,21 +192,19 @@ def fetch_gallery_data(raw_slug):
                 club_n = str(active_club.get("name", "Svincolato"))
                 league_full_text = f"{l_name} {l_slug}".lower()
 
-                # Calcolo esatto carta per carta:
-                # 1. Livello XP: 1% per livello esatto della carta
+                # 1. LIVELLO XP CARTA DA SORARE (1% per livello)
                 level_bonus = float(grade_val) * 1.0
-                
-                # 2. Stagionale: +5% solo se In-Season (2026), 0% Classic
+
+                # 2. STAGIONALE (5% In-Season, 0% Classic)
                 season_bonus = 5.0 if is_in_season else 0.0
-                
-                # 3. Collezione verificata sul club reale della carta:
-                # Se è SL Benfica In-Season (come Samuel Soares con 13%) riceve il 5% di collezione Sorare
-                # Il Porto riceve 0% (come verificato da Sorare per la tua galleria attuale)
-                club_clean = club_n.lower()
-                if "benfica" in club_clean and is_in_season:
-                    collection_bonus = 5.0
-                else:
-                    collection_bonus = 0.0
+
+                # 3. BONUS COLLEZIONE DIRETTO DAL SERVER SORARE
+                coll_node = card.get("clubCollection") or {}
+                raw_b = coll_node.get("bonus")
+                collection_bonus = 0.0
+                if raw_b is not None and isinstance(raw_b, (int, float)):
+                    f_val = float(raw_b)
+                    collection_bonus = round(f_val * 100.0 if f_val < 0.5 else f_val, 1)
 
                 total_bonus = round(level_bonus + season_bonus + collection_bonus, 1)
                 card_mult = 1.0 + (total_bonus / 100.0)
@@ -223,7 +224,7 @@ def fetch_gallery_data(raw_slug):
                     "multiplier": card_mult,
                     "is_in_season": is_in_season,
                     "club_name": club_n,
-                    "club_lower": club_clean,
+                    "club_lower": club_n.lower(),
                     "league_slug": l_slug,
                     "league_name": l_name,
                     "league_text": league_full_text,
@@ -491,7 +492,7 @@ with tab_h2h:
             st.caption(f"Squadra: **{p1['club_name']}** ({p1['league_name']})")
             st.write(f"• **Ruolo:** `{p1['position']}`")
             st.write(f"• **Bonus Livello (1%/lvl):** +{p1['level_bonus']}% (Livello {p1['grade']})")
-            st.write(f"• **Bonus Collezione:** +{p1['collection_bonus']}%")
+            st.write(f"• **Bonus Collezione Sorare:** +{p1['collection_bonus']}%")
             st.write(f"• **Bonus Stagionale:** {'+5.0% (In-Season 2026)' if p1['is_in_season'] else '+0.0% (Classic)'}")
             st.write(f"• **Bonus Totale Carta:** **+{p1['bonus_pct']}%** (Moltiplicatore x{p1['multiplier']:.3f})")
             st.write(f"• **Titolarità L5:** {p1['starter_rate']}% ({p1['l5_apps']}/5 presenze)")
@@ -508,7 +509,7 @@ with tab_h2h:
             st.caption(f"Squadra: **{p2['club_name']}** ({p2['league_name']})")
             st.write(f"• **Ruolo:** `{p2['position']}`")
             st.write(f"• **Bonus Livello (1%/lvl):** +{p2['level_bonus']}% (Livello {p2['grade']})")
-            st.write(f"• **Bonus Collezione:** +{p2['collection_bonus']}%")
+            st.write(f"• **Bonus Collezione Sorare:** +{p2['collection_bonus']}%")
             st.write(f"• **Bonus Stagionale:** {'+5.0% (In-Season 2026)' if p2['is_in_season'] else '+0.0% (Classic)'}")
             st.write(f"• **Bonus Totale Carta:** **+{p2['bonus_pct']}%** (Moltiplicatore x{p2['multiplier']:.3f})")
             st.write(f"• **Titolarità L5:** {p2['starter_rate']}% ({p2['l5_apps']}/5 presenze)")
@@ -520,7 +521,7 @@ with tab_h2h:
 
 # --- TAB 3: ROSA GENERALE ---
 with tab_gallery:
-    st.subheader("📊 Rosa Ufficiale Limited con Dettaglio Bonus Individuale")
+    st.subheader("📊 Rosa Ufficiale Limited con Dettaglio Bonus Sorare")
     display_df = df[["name", "club_name", "league_name", "position", "is_in_season", "grade", "level_bonus", "collection_bonus", "season_bonus", "bonus_pct", "multiplier", "floor_idx", "ceiling_idx", "card_slug"]].copy()
     display_df["is_in_season"] = display_df["is_in_season"].apply(lambda x: "🟢 In-Season (2026)" if x else "⚪ Classic")
     display_df["grade"] = display_df["grade"].apply(lambda x: f"Lvl {x}")
@@ -540,7 +541,7 @@ with tab_gallery:
             "is_in_season": "Stagionalità",
             "grade": "Livello XP",
             "level_bonus": "Bonus XP (1%/lvl)",
-            "collection_bonus": "Bonus Collezione",
+            "collection_bonus": "Bonus Collezione Sorare",
             "season_bonus": "Bonus Stagionale",
             "bonus_pct": "Bonus Totale Carta",
             "multiplier": "Moltiplicatore",
