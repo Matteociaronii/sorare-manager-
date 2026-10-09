@@ -16,33 +16,36 @@ st.set_page_config(
 API_URL = "https://api.sorare.com/graphql"
 IN_SEASON_YEAR = 2026
 
-# Identificatori esatti delle 5 leghe principali (Serie A compresa per Champion, no torneo singolo)
-EXACT_TOP_5_SLUGS = {
-    "premier-league", "england-premier-league",
-    "laliga-santander", "spain-laliga", "la-liga",
-    "bundesliga", "germany-bundesliga",
-    "ligue-1", "france-ligue-1",
-    "serie-a", "italy-serie-a"
-}
+# Riconoscimento Top 5 leghe (Inghilterra, Spagna, Italia, Germania 1, Francia)
+# Serie A inclusa per Champion, esclusa dai singoli campionati
+TOP_5_PATTERNS = ["premier", "laliga", "serie-a", "serie a", "bundesliga", "ligue 1", "ligue-1"]
 
-# Campionati Challenger Europe
-CHALLENGER_KEYWORDS = [
-    "portugal", "primeira", "betclic", "eredivisie", "netherlands",
-    "jupiler", "belgium", "premiership", "scotland", "spfl",
-    "super-lig", "turkey", "austria", "swiss", "switzerland", "denmark", "superliga"
+# Esclusioni categoriche da Champion e dalle prime divisioni
+EXCLUDED_PATTERNS = [
+    "scotland", "premiership", "spfl", "scottish",
+    "bundesliga-2", "2-bundesliga", "2. bundesliga",
+    "segunda", "serie-b", "serie b", "ligue-2", "ligue 2",
+    "championship", "austria", "austrian", "swiss", "switzerland"
 ]
 
-# Mappatura campionati singoli
+# Challenger Europe (Scozia, Olanda, Portogallo, Belgio, Turchia, Austria, ecc.)
+CHALLENGER_PATTERNS = [
+    "scotland", "premiership", "spfl", "portugal", "primeira", "betclic",
+    "eredivisie", "netherlands", "jupiler", "belgium", "super-lig", "turkey",
+    "austria", "austrian", "swiss", "switzerland", "denmark", "superliga"
+]
+
+# Campionati domestici singoli disponibili (Serie A esclusa dai singoli)
 DOMESTIC_LEAGUES_MAP = {
-    "Premier League": ["premier-league", "england-premier-league", "premier"],
-    "LaLiga EA Sports": ["laliga-santander", "spain-laliga", "laliga"],
-    "Bundesliga": ["germany-bundesliga", "bundesliga"],
-    "Ligue 1": ["france-ligue-1", "ligue-1"],
-    "Liga Portugal": ["portugal", "primeira", "betclic"],
-    "Eredivisie": ["eredivisie", "netherlands"],
-    "Jupiler Pro League": ["jupiler", "belgium"],
-    "Scottish Premiership": ["premiership", "scotland", "spfl"],
-    "MLS": ["mls", "major-league-soccer"]
+    "Premier League": "premier-league",
+    "LaLiga EA Sports": "laliga",
+    "Bundesliga (1. Divisione)": "bundesliga",
+    "Ligue 1": "ligue-1",
+    "Liga Portugal": "portugal",
+    "Eredivisie": "eredivisie",
+    "Jupiler Pro League": "jupiler",
+    "Scottish Premiership": "scotland",
+    "MLS": "mls"
 }
 
 # Club partecipanti a UEFA Champions League
@@ -73,7 +76,6 @@ UEL_UECL_CLUBS = [
 
 HOT_STREAK_STEPS = [320, 360, 380, 420, 440, 470, 550]
 
-# Query GraphQL: richiede la posizione della specifica carta oltre a quella del player
 QUERY_USER_GALLERY = """
 query GetUserGalleryCards($slug: String!, $cursor: String) {
   user(slug: $slug) {
@@ -154,7 +156,7 @@ def fetch_gallery_data(raw_slug):
             nodes = cards_connection.get("nodes", []) if isinstance(cards_connection, dict) else []
             
             for card in nodes:
-                # FILTRO ESCLUSIVO: SOLO LIMITED
+                # FILTRO RIGIDO: SOLO LIMITED
                 rarity = str(card.get("rarityTyped", "")).lower()
                 if rarity != "limited":
                     continue
@@ -176,7 +178,7 @@ def fetch_gallery_data(raw_slug):
                 floor_idx = round(mean_l5 * 0.8, 1)
                 ceiling_idx = round(mean_l5 * 1.35, 1)
 
-                # Priorità alla posizione stampata su questa singola carta (es. Olise FW)
+                # Priorità alla posizione stampata su questa specifica carta (es. Olise ATT)
                 card_pos = card.get("positionTyped")
                 if not card_pos:
                     card_pos = player.get("position", "")
@@ -185,6 +187,7 @@ def fetch_gallery_data(raw_slug):
                 l_slug = str(domestic_league.get("slug", "")).lower().strip()
                 l_name = str(domestic_league.get("name", "Altro"))
                 club_n = str(active_club.get("name", "Svincolato"))
+                league_full_text = f"{l_name} {l_slug}".lower()
 
                 cards_data.append({
                     "card_slug": card.get("slug"),
@@ -199,7 +202,7 @@ def fetch_gallery_data(raw_slug):
                     "club_lower": club_n.lower(),
                     "league_slug": l_slug,
                     "league_name": l_name,
-                    "league_combined": f"{l_name} {l_slug}".lower(),
+                    "league_text": league_full_text,
                     "l5_avg": round(mean_l5, 1),
                     "floor_idx": floor_idx,
                     "ceiling_idx": ceiling_idx,
@@ -295,14 +298,14 @@ if st.sidebar.button("🗑️ Sblocca Formazioni"):
     st.session_state["saved_lineups"] = {}
     st.rerun()
 
-# Logica di assegnazione torneo rigorosa
-def is_genuine_top_5(row):
-    slug = row["league_slug"]
-    # Escludi categoricamente 2. divisioni e leghe secondarie
-    if any(ex in slug for ex in ["bundesliga-2", "2-bundesliga", "segunda", "serie-b", "ligue-2", "championship"]):
+# Riconoscimento Top 5 sicuro ed esente da falsi positivi
+def check_is_top_5(row):
+    text = row["league_text"]
+    # Se fa parte di leghe escluse (Scozia, 2. Bundesliga, Austria, ecc.), scartala subito da Champion
+    if any(exc in text for exc in EXCLUDED_PATTERNS):
         return False
-    # Accetta solo le vere prime divisioni
-    return slug in EXACT_TOP_5_SLUGS or any(t == slug for t in EXACT_TOP_5_SLUGS)
+    # Accetta solo se è Premier, LaLiga, Serie A, 1. Bundesliga, Ligue 1
+    return any(p in text for p in TOP_5_PATTERNS)
 
 def filter_eligible_cards(data, main_cat, comp_name, single_choice, exclude_locked=True):
     temp = data.copy()
@@ -310,14 +313,14 @@ def filter_eligible_cards(data, main_cat, comp_name, single_choice, exclude_lock
         temp = temp[~temp["card_slug"].isin(st.session_state["locked_cards"])]
         
     if main_cat == "Champion Europe (Top 5 Leghe)":
-        temp = temp[temp.apply(is_genuine_top_5, axis=1)]
+        temp = temp[temp.apply(check_is_top_5, axis=1)]
         if "In-Season" in comp_name:
             temp = temp[temp["is_in_season"]]
 
     elif main_cat == "Challenger Europe":
-        # Campionati europei non-Top 5 (es. Austria con Demir, Scozia con Celtic/Hearts, Portogallo, Olanda, Belgio, Turchia)
-        temp = temp[~temp.apply(is_genuine_top_5, axis=1)]
-        temp = temp[temp["league_combined"].apply(lambda s: any(k in s for k in CHALLENGER_KEYWORDS))]
+        # Campionati europei esclusi dalla Top 5 (Scozia, Portogallo, Olanda, Belgio, Turchia, Austria, ecc.)
+        temp = temp[~temp.apply(check_is_top_5, axis=1)]
+        temp = temp[temp["league_text"].apply(lambda s: any(k in s for k in CHALLENGER_PATTERNS))]
         if "In-Season" in comp_name:
             temp = temp[temp["is_in_season"]]
 
@@ -334,11 +337,25 @@ def filter_eligible_cards(data, main_cat, comp_name, single_choice, exclude_lock
             temp = temp[temp["is_in_season"]]
 
     elif main_cat == "Campionato Singolo Domestico":
-        allowed_keywords = DOMESTIC_LEAGUES_MAP.get(single_choice, [])
-        if "Bundesliga" in single_choice:
-            temp = temp[temp.apply(is_genuine_top_5, axis=1) & temp["league_slug"].str.contains("bundesliga", na=False)]
-        else:
-            temp = temp[temp["league_combined"].apply(lambda s: any(k in s for k in allowed_keywords))]
+        if single_choice == "Premier League":
+            # Solo Premier League inglese (escludendo categoricamente Scozia e Championship)
+            temp = temp[temp["league_text"].str.contains("premier", na=False) & ~temp["league_text"].str.contains("scotland|premiership|spfl|scottish", na=False)]
+        elif single_choice == "Bundesliga (1. Divisione)":
+            temp = temp[temp["league_text"].str.contains("bundesliga", na=False) & ~temp["league_text"].str.contains("bundesliga-2|2-bundesliga|2. bundesliga|austria", na=False)]
+        elif single_choice == "Scottish Premiership":
+            temp = temp[temp["league_text"].str.contains("scotland|premiership|spfl|scottish", na=False)]
+        elif single_choice == "Liga Portugal":
+            temp = temp[temp["league_text"].str.contains("portugal|primeira|betclic", na=False)]
+        elif single_choice == "LaLiga EA Sports":
+            temp = temp[temp["league_text"].str.contains("laliga|spain|santander", na=False) & ~temp["league_text"].str.contains("segunda", na=False)]
+        elif single_choice == "Ligue 1":
+            temp = temp[temp["league_text"].str.contains("ligue 1|ligue-1", na=False) & ~temp["league_text"].str.contains("ligue-2|ligue 2", na=False)]
+        elif single_choice == "Eredivisie":
+            temp = temp[temp["league_text"].str.contains("eredivisie|netherlands", na=False)]
+        elif single_choice == "Jupiler Pro League":
+            temp = temp[temp["league_text"].str.contains("jupiler|belgium", na=False)]
+        elif single_choice == "MLS":
+            temp = temp[temp["league_text"].str.contains("mls|major league soccer", na=False)]
 
     elif main_cat == "All-Star (Tutti i campionati)":
         pass
