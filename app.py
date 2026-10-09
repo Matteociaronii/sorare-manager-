@@ -88,75 +88,46 @@ HEADERS = {
     "Accept": "application/json"
 }
 
-# Funzione per identificare i campi validi di So5AppearanceBonusInterface
-@st.cache_data(ttl=3600, show_spinner=False)
-def inspect_bonus_fields():
-    introspection_query = """
-    query {
-      __type(name: "So5AppearanceBonusInterface") {
-        fields {
-          name
+# Query a batch ridotto (first: 12) per mantenere la complessità ben sotto i 500 punti
+QUERY_USER_GALLERY = """
+query GetUserGalleryCards($slug: String!,$cursor: String) {
+  user(slug: $slug) {
+    cards(first: 12, after: $cursor) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+      nodes {
+        slug
+        rarityTyped
+        ... on Card {
+          positionTyped
+          bonuses {
+            percentage
+            type
+          }
+          season {
+            startYear
+          }
+          player {
+            slug
+            displayName
+            position
+            activeClub {
+              name
+              domesticLeague {
+                slug
+                name
+              }
+            }
+            lastFiveSo5Appearances
+          }
         }
       }
     }
-    """
-    try:
-        r = requests.post(API_URL, json={"query": introspection_query}, headers=HEADERS, timeout=10)
-        res = r.json()
-        f_list = res.get("data", {}).get("__type", {}).get("fields", [])
-        names = [f["name"] for f in f_list if "name" in f]
-        return names
-    except Exception:
-        return []
-
-def build_graphql_query(bonus_field_names):
-    # Se il campo percentage o value è presente in So5AppearanceBonusInterface
-    bonus_subfields = []
-    for cand in ["percentage", "value", "type", "__typename"]:
-        if cand in bonus_field_names or cand == "__typename":
-            bonus_subfields.append(cand)
-            
-    bonus_selection = " ".join(bonus_subfields) if bonus_subfields else "__typename"
-    
-    query = f"""
-    query GetUserGalleryCards($slug: String!,$cursor: String) {{
-      user(slug: $slug) {{
-        cards(first: 20, after: $cursor) {{
-          pageInfo {{
-            hasNextPage
-            endCursor
-          }}
-          nodes {{
-            slug
-            rarityTyped
-            ... on Card {{
-              positionTyped
-              bonuses {{
-                {bonus_selection}
-              }}
-              season {{
-                startYear
-              }}
-              player {{
-                slug
-                displayName
-                position
-                activeClub {{
-                  name
-                  domesticLeague {{
-                    slug
-                    name
-                  }}
-                }}
-                lastFiveSo5Appearances
-              }}
-            }}
-          }}
-        }}
-      }}
-    }}
-    """
-    return query
+  }
+}
+"""
 
 def extract_slug(input_val):
     val = input_val.strip()
@@ -173,15 +144,12 @@ def fetch_gallery_data(raw_slug):
     cursor = None
     has_next = True
     
-    bonus_fields = inspect_bonus_fields()
-    query_string = build_graphql_query(bonus_fields)
-    
     while has_next:
         variables = {"slug": user_slug, "cursor": cursor}
         try:
             resp = requests.post(
                 API_URL,
-                json={"query": query_string, "variables": variables},
+                json={"query": QUERY_USER_GALLERY, "variables": variables},
                 headers=HEADERS,
                 timeout=15
             )
@@ -200,7 +168,7 @@ def fetch_gallery_data(raw_slug):
             nodes = cards_connection.get("nodes", []) if isinstance(cards_connection, dict) else []
             
             for card in nodes:
-                # FILTRO ESCLUSIVO: SOLO LIMITED
+                # FILTRO RIGIDO: SOLO CARTE LIMITED
                 rarity = str(card.get("rarityTyped", "")).lower()
                 if rarity != "limited":
                     continue
@@ -220,13 +188,11 @@ def fetch_gallery_data(raw_slug):
                 if isinstance(raw_bonuses, list) and len(raw_bonuses) > 0:
                     for b in raw_bonuses:
                         if isinstance(b, dict):
-                            val = b.get("percentage") or b.get("value")
+                            val = b.get("percentage")
                             if val is not None and isinstance(val, (int, float)):
                                 total_bonus_val += float(val)
                                 
-                # Normalizzazione percentuale
                 if total_bonus_val > 0.0:
-                    # Se l'API restituisce 5 per 5%, o 0.05 per 5%
                     if total_bonus_val < 0.5:
                         card_multiplier = 1.0 + total_bonus_val
                         bonus_percentage = round(total_bonus_val * 100.0, 1)
