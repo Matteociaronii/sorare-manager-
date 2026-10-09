@@ -88,58 +88,68 @@ HEADERS = {
     "Accept": "application/json"
 }
 
-# Query a batch ridotto (first: 10) che interroga con frammenti inline i singoli tipi di bonus reali
-QUERY_USER_GALLERY = """
-query GetUserGalleryCards($slug: String!,$cursor: String) {
-  user(slug: $slug) {
-    cards(first: 10, after: $cursor) {
-      pageInfo {
-        hasNextPage
-        endCursor
-      }
-      nodes {
-        slug
-        rarityTyped
-        ... on Card {
-          positionTyped
-          grade
-          bonuses {
-            __typename
-            ... on So5AppearanceBonusInterface {
-              type
-            }
-            ... on So5AppearanceLevelBonus {
-              bonus
-            }
-            ... on So5AppearanceCollectionBonus {
-              bonus
-            }
-            ... on So5AppearanceSeasonBonus {
-              bonus
-            }
-          }
-          season {
-            startYear
-          }
-          player {
-            slug
-            displayName
-            position
-            activeClub {
-              name
-              domesticLeague {
-                slug
-                name
-              }
-            }
-            lastFiveSo5Appearances
-          }
+# Rilevamento dinamico campi senza generare errori di validazione
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_supported_bonus_fields():
+    introspection = """
+    query {
+      __type(name: "So5AppearanceBonusInterface") {
+        fields {
+          name
         }
       }
     }
-  }
-}
-"""
+    """
+    try:
+        r = requests.post(API_URL, json={"query": introspection}, headers=HEADERS, timeout=8)
+        data = r.json().get("data", {}).get("__type", {}) or {}
+        fields = [f["name"] for f in data.get("fields", []) if "name" in f]
+        return fields
+    except Exception:
+        return []
+
+def get_cards_query(valid_fields):
+    field_selection = " ".join(valid_fields) if valid_fields else "__typename"
+    return f"""
+    query GetUserGalleryCards($slug: String!,$cursor: String) {{
+      user(slug: $slug) {{
+        cards(first: 15, after: $cursor) {{
+          pageInfo {{
+            hasNextPage
+            endCursor
+          }}
+          nodes {{
+            slug
+            rarityTyped
+            ... on Card {{
+              positionTyped
+              grade
+              bonuses {{
+                __typename
+                {field_selection}
+              }}
+              season {{
+                startYear
+              }}
+              player {{
+                slug
+                displayName
+                position
+                activeClub {{
+                  name
+                  domesticLeague {{
+                    slug
+                    name
+                  }}
+                }}
+                lastFiveSo5Appearances
+              }}
+            }}
+          }}
+        }}
+      }}
+    }}
+    """
 
 def extract_slug(input_val):
     val = input_val.strip()
@@ -156,12 +166,17 @@ def fetch_gallery_data(raw_slug):
     cursor = None
     has_next = True
     
+    valid_fields = get_supported_bonus_fields()
+    # Rimuoviamo campi noti per causare conflitti se non presenti
+    safe_fields = [f for f in valid_fields if f not in ["type", "total", "percentage"]]
+    query_str = get_cards_query(safe_fields)
+    
     while has_next:
         variables = {"slug": user_slug, "cursor": cursor}
         try:
             resp = requests.post(
                 API_URL,
-                json={"query": QUERY_USER_GALLERY, "variables": variables},
+                json={"query": query_str, "variables": variables},
                 headers=HEADERS,
                 timeout=15
             )
@@ -194,43 +209,29 @@ def fetch_gallery_data(raw_slug):
                 is_in_season = (card_year == IN_SEASON_YEAR)
                 grade_val = int(card.get("grade") or 0)
                 
-                # ESTRAZIONE CARTA PER CARTA DEI BONUS REALI DA SORARE
-                raw_bonuses = card.get("bonuses") or []
-                level_pct = 0.0
-                collection_pct = 0.0
-                season_pct = 0.0
-                other_pct = 0.0
+                # ESTRAZIONE PUNTUALE DEI BONUS EFFETTIVI:
+                # 1. Livello XP: 1% per livello
+                level_pct = float(grade_val) * 1.0
                 
-                if isinstance(raw_bonuses, list) and len(raw_bonuses) > 0:
+                # 2. In-Season: +5% se stagione 2026
+                season_pct = 5.0 if is_in_season else 0.0
+                
+                # 3. Bonus Collezione o altri bonus estratti dall'oggetto bonuses
+                collection_pct = 0.0
+                raw_bonuses = card.get("bonuses") or []
+                if isinstance(raw_bonuses, list):
                     for b in raw_bonuses:
-                        if not isinstance(b, dict):
-                            continue
-                        t_name = str(b.get("__typename", "")).lower()
-                        b_type = str(b.get("type", "")).lower()
-                        val = b.get("bonus")
-                        if val is None:
-                            continue
-                        
-                        f_val = float(val)
-                        # Se il valore è in frazione (es. 0.05 per 5%) o intero (5 per 5%)
-                        norm_pct = f_val * 100.0 if f_val < 0.5 else f_val
-                        
-                        if "level" in t_name or "level" in b_type:
-                            level_pct += norm_pct
-                        elif "collection" in t_name or "collection" in b_type:
-                            collection_pct += norm_pct
-                        elif "season" in t_name or "season" in b_type:
-                            season_pct += norm_pct
-                        else:
-                            other_pct += norm_pct
+                        if isinstance(b, dict):
+                            t_name = str(b.get("__typename", "")).lower()
+                            # Somma valori se presenti nei campi validi
+                            for k, v in b.items():
+                                if k != "__typename" and isinstance(v, (int, float)):
+                                    v_float = float(v)
+                                    val_pct = v_float * 100.0 if v_float < 0.5 else v_float
+                                    if "collection" in t_name or "coll" in k.lower():
+                                        collection_pct = max(collection_pct, val_pct)
 
-                # Fallback preciso se un singolo componente non è popolato
-                if level_pct == 0.0 and grade_val > 0:
-                    level_pct = float(grade_val) * 1.0
-                if season_pct == 0.0 and is_in_season:
-                    season_pct = 5.0
-                    
-                total_bonus_pct = round(level_pct + collection_pct + season_pct + other_pct, 1)
+                total_bonus_pct = round(level_pct + season_pct + collection_pct, 1)
                 card_multiplier = 1.0 + (total_bonus_pct / 100.0)
 
                 l5_apps = player.get("lastFiveSo5Appearances", 0) or 0
@@ -304,7 +305,7 @@ if st.sidebar.button("🔄 Sincronizza Dati GW"):
     st.session_state["saved_lineups"] = {}
     st.sidebar.success("Cache aggiornata!")
 
-with st.spinner("Scaricamento delle tue carte Limited con estrazione bonus da Sorare..."):
+with st.spinner("Scaricamento delle tue carte Limited con calcolo bonus reali..."):
     df = fetch_gallery_data(user_input)
 
 if df.empty:
@@ -457,9 +458,9 @@ with tab_builder:
                 already_chosen = [c["card_slug"] for c in selected_cards.values() if c is not None]
                 candidates = candidates[~candidates["card_slug"].isin(already_chosen)]
                 
-                # Etichetta con bonus carta individuale letto direttamente da Sorare
+                # Etichetta unificata che riporta la somma reale dei bonus attivi
                 options_dict = {
-                    f"{row['name']} ({row['club_name']}) - {'🟢' if row['is_in_season'] else '⚪'} (+{row['bonus_pct']}%) - Ruolo: {row['position']} - L5: {row['l5_apps']}/5": row['card_slug']
+                    f"{row['name']} ({row['club_name']}) - {'🟢' if row['is_in_season'] else '⚪'} (+{row['bonus_pct']}%) - {row['position']} - L5: {row['l5_apps']}/5": row['card_slug']
                     for _, row in candidates.iterrows()
                 }
                 options_list = ["-- Vuoto --"] + list(options_dict.keys())
@@ -534,7 +535,7 @@ with tab_h2h:
             st.caption(f"Squadra: **{p1['club_name']}** ({p1['league_name']})")
             st.write(f"• **Ruolo:** `{p1['position']}`")
             st.write(f"• **Bonus Livello (XP):** +{p1['level_bonus']}% (Livello {p1['grade']})")
-            st.write(f"• **Bonus Collezione Singola Carta:** +{p1['collection_bonus']}%")
+            st.write(f"• **Bonus Collezione Carta:** +{p1['collection_bonus']}%")
             st.write(f"• **Bonus Stagionale:** {'+5.0% (In-Season 2026)' if p1['is_in_season'] else '+0.0% (Classic)'}")
             st.write(f"• **Bonus Totale Carta Effettivo:** **+{p1['bonus_pct']}%** (Moltiplicatore x{p1['multiplier']:.3f})")
             st.write(f"• **Titolarità L5:** {p1['starter_rate']}% ({p1['l5_apps']}/5 presenze)")
@@ -551,7 +552,7 @@ with tab_h2h:
             st.caption(f"Squadra: **{p2['club_name']}** ({p2['league_name']})")
             st.write(f"• **Ruolo:** `{p2['position']}`")
             st.write(f"• **Bonus Livello (XP):** +{p2['level_bonus']}% (Livello {p2['grade']})")
-            st.write(f"• **Bonus Collezione Singola Carta:** +{p2['collection_bonus']}%")
+            st.write(f"• **Bonus Collezione Carta:** +{p2['collection_bonus']}%")
             st.write(f"• **Bonus Stagionale:** {'+5.0% (In-Season 2026)' if p2['is_in_season'] else '+0.0% (Classic)'}")
             st.write(f"• **Bonus Totale Carta Effettivo:** **+{p2['bonus_pct']}%** (Moltiplicatore x{p2['multiplier']:.3f})")
             st.write(f"• **Titolarità L5:** {p2['starter_rate']}% ({p2['l5_apps']}/5 presenze)")
@@ -582,7 +583,7 @@ with tab_gallery:
             "position": "Ruolo",
             "is_in_season": "Stagionalità",
             "grade": "Livello XP",
-            "level_bonus": "Bonus Livello",
+            "level_bonus": "Bonus Livello (1%/lvl)",
             "collection_bonus": "Bonus Collezione",
             "season_bonus": "Bonus Stagionale",
             "bonus_pct": "Bonus Totale Carta",
