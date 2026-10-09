@@ -48,32 +48,35 @@ DOMESTIC_LEAGUES_MAP = {
     "MLS": "mls"
 }
 
-# Club partecipanti a UEFA Champions League (Stagione 2026/27)
+# 36 Club Ufficiali UEFA Champions League (Stagione 2026/27) - Include FC Porto
 UCL_CLUBS_2026_27 = [
-    "manchester city", "arsenal", "liverpool", "aston villa",
-    "real madrid", "barcelona", "atlético", "atletico", "girona", "villarreal", "real betis",
-    "inter", "inter milan", "napoli", "atalanta", "bologna", "como",
+    "porto", "fc porto", "futebol clube do porto",
+    "manchester city", "arsenal", "liverpool", "aston villa", "manchester united",
+    "real madrid", "barcelona", "atlético", "atletico", "villarreal", "real betis",
+    "inter", "inter milan", "napoli", "roma", "as roma", "como",
     "bayern", "bayern munchen", "borussia dortmund", "dortmund", "leipzig", "stuttgart",
-    "paris saint-germain", "psg", "monaco", "brest", "lille", "lens",
+    "paris saint-germain", "psg", "lille", "lens",
     "sporting cp", "sporting", "psv", "feyenoord",
-    "club brugge", "shakhtar", "dinamo zagreb", "salzburg", "young boys",
-    "crvena zvezda", "sparta praha", "slavia", "slavia praha", "sturm graz", "bodo", "bodo/glimt",
-    "galatasaray", "fenerbahce", "aek athens", "slovan bratislava", "sabah", "lask"
+    "club brugge", "shakhtar", "bodo", "bodo/glimt",
+    "galatasaray", "fenerbahce", "fenerbahçe",
+    "slavia", "slavia praha", "sabah", "lask", "viking",
+    "slovan bratislava", "aek athens"
 ]
 
-# Club partecipanti a UEFA Europa League & Conference League (Stagione 2026/27)
+# Club Qualificati UEL & UECL (Stagione 2026/27) - Esclusa Fiorentina, Porto spostato in UCL
 UEL_UECL_CLUBS_2026_27 = [
-    "benfica", "sl benfica", "porto", "fc porto", "braga", "vitoria", "guimaraes", "torreense",
-    "milan", "ac milan", "juventus", "roma", "lazio", "fiorentina",
-    "manchester united", "tottenham", "chelsea", "bournemouth", "crystal palace", "sunderland",
+    "benfica", "sl benfica", "braga", "sc braga", "vitoria", "guimaraes",
+    "milan", "ac milan", "juventus", "lazio", "atalanta", "bologna",
+    "tottenham", "chelsea", "newcastle",
     "real sociedad", "athletic club", "celta vigo",
-    "bayer leverkusen", "leverkusen", "hoffenheim", "heidenheim",
-    "marseille", "olympique lyonnais", "lyon", "nice", "rennes",
-    "ajax", "az alkmaar", "alkmaar", "twente", "nec nijmegen", "nec",
-    "anderlecht", "union saint-gilloise", "gent", "cercle brugge",
+    "bayer leverkusen", "leverkusen", "frankfurt", "hoffenheim", "heidenheim",
+    "marseille", "lyon", "olympique lyonnais", "nice", "monaco", "brest",
+    "ajax", "az alkmaar", "alkmaar", "twente", "utrecht",
+    "anderlecht", "union saint-gilloise", "gent", "genk", "cercle brugge",
     "celtic", "rangers", "heart", "hearts", "aberdeen",
-    "besiktas", "basaksehir", "olympiakos", "paok", "panathinaikos", "viktoria plzen",
-    "lech poznan", "jagiellonia", "ferencvaros", "omonoia", "celje", "hapoel"
+    "besiktas", "basaksehir", "trabzonspor",
+    "olympiacos", "paok", "panathinaikos", "viktoria plzen", "sparta praha",
+    "young boys", "basel", "salzburg", "sturm graz", "rapid wien"
 ]
 
 HOT_STREAK_STEPS = [320, 360, 380, 420, 440, 470, 550]
@@ -324,14 +327,14 @@ def filter_eligible_cards(data, main_cat, comp_name, single_choice, exclude_lock
             temp = temp[temp["is_in_season"]]
 
     elif main_cat == "UEFA Champions League":
-        # Esclude espressamente il Benfica (che gioca in Europa League)
-        temp = temp[~temp["club_lower"].str.contains("benfica", na=False)]
         pattern = "|".join(UCL_CLUBS_2026_27)
         temp = temp[temp["club_lower"].str.contains(pattern, na=False)]
         if "In-Season" in comp_name:
             temp = temp[temp["is_in_season"]]
 
     elif main_cat == "UEFA Europa & Conference League":
+        # Esclude categoricamente Fiorentina e le squadre di Champions League
+        temp = temp[~temp["club_lower"].str.contains("fiorentina", na=False)]
         pattern = "|".join(UEL_UECL_CLUBS_2026_27)
         temp = temp[temp["club_lower"].str.contains(pattern, na=False)]
         if "In-Season" in comp_name:
