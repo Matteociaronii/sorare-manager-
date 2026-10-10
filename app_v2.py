@@ -145,7 +145,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# REGOLE & COSTANTI COMPETIZIONI
+# COSTANTI COMPETIZIONI
 # ==========================================
 API_URL = "https://api.sorare.com/graphql"
 IN_SEASON_YEAR = 2026
@@ -192,7 +192,7 @@ UEL_UECL_CLUBS_2026_27 = [
     "benfica", "sl benfica", "vitoria", "guimaraes",
     "milan", "ac milan", "juventus", "lazio", "atalanta", "bologna",
     "tottenham", "chelsea", "newcastle",
-    "real sociedad", "athletic club", "celta vigo",
+    "real society", "athletic club", "celta vigo",
     "bayer leverkusen", "leverkusen", "frankfurt", "hoffenheim", "heidenheim",
     "marseille", "lyon", "olympique lyonnais", "nice", "monaco", "brest",
     "ajax", "az alkmaar", "alkmaar", "twente", "utrecht",
@@ -225,7 +225,7 @@ def clean_club_key(club_name):
             clean = clean[len(prefix):]
     return clean
 
-# Query certificata (struttura intatta di app.py per garantire 297 carte senza errori 422)
+# Query certificata Sorare
 QUERY_CARDS = """
 query GetUserCards($slug: String!, $cursor: String) {
   user(slug: $slug) {
@@ -273,54 +273,49 @@ KNOWN_ACCOUNT_ALBUMS = {
     ("bologna", 2024): 3.0,
 }
 
-# CALENDARIO GAME WEEK 2026/27 (SQUADRE UFFICIALI CLUB)
-MATCHUPS_GW = {
-    "benfica": {"desc": "vs Rio Ave (Casa)", "has": True, "mult": 1.05},
-    "porto": {"desc": "vs Braga (Casa)", "has": True, "mult": 1.03},
-    "sporting": {"desc": "@ Arouca (Trasferta)", "has": True, "mult": 0.98},
-    "braga": {"desc": "@ FC Porto (Trasferta)", "has": True, "mult": 0.95},
-    "celtic": {"desc": "vs Motherwell (Casa)", "has": True, "mult": 1.05},
-    "rangers": {"desc": "@ Kilmarnock (Trasferta)", "has": True, "mult": 0.97},
-    "bologna": {"desc": "vs Atalanta (Casa)", "has": True, "mult": 1.00},
-    "fiorentina": {"desc": "vs Roma (Casa)", "has": True, "mult": 0.99},
-    "milan": {"desc": "@ Udinese (Trasferta)", "has": True, "mult": 0.97},
-    "inter": {"desc": "vs Torino (Casa)", "has": True, "mult": 1.05},
-    "roma": {"desc": "@ Fiorentina (Trasferta)", "has": True, "mult": 0.97},
-    "napoli": {"desc": "vs Como (Casa)", "has": True, "mult": 1.06},
-    "como": {"desc": "@ Napoli (Trasferta)", "has": True, "mult": 0.92},
-    "manchester city": {"desc": "vs Fulham (Casa)", "has": True, "mult": 1.06},
-    "liverpool": {"desc": "@ Crystal Palace (Trasferta)", "has": True, "mult": 0.98},
-    "arsenal": {"desc": "vs Southampton (Casa)", "has": True, "mult": 1.06},
-    "chelsea": {"desc": "vs Nottingham Forest (Casa)", "has": True, "mult": 1.04},
-    "paris saint-germain": {"desc": "@ Nice (Trasferta)", "has": True, "mult": 0.98},
-    "bayern munchen": {"desc": "@ Eintracht Frankfurt (Trasferta)", "has": True, "mult": 0.98},
-    "bayern": {"desc": "@ Eintracht Frankfurt (Trasferta)", "has": True, "mult": 0.98},
-    "bayer 04 leverkusen": {"desc": "vs Holstein Kiel (Casa)", "has": True, "mult": 1.06},
-    "leverkusen": {"desc": "vs Holstein Kiel (Casa)", "has": True, "mult": 1.06},
-    "barcelona": {"desc": "@ Alaves (Trasferta)", "has": True, "mult": 0.99},
-    "real madrid": {"desc": "vs Villarreal (Casa)", "has": True, "mult": 1.04},
-    "rapid wien": {"desc": "vs LASK (Casa)", "has": True, "mult": 1.02},
-    "saint-étienne": {"desc": "vs Auxerre (Casa)", "has": True, "mult": 1.00},
-}
+# =============================================================================
+# LIVE GW FIXTURE ENGINE (DA ENDPOINT UFFICIALE SORARE)
+# =============================================================================
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_sorare_live_gw_fixtures():
+    """
+    Recupera le partite della Game Week attiva direttamente dal feed ufficiale Sorare.
+    """
+    gw_fixtures = {}
+    try:
+        url = "https://api.sorare.com/api/v1/football/games"
+        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
+        if resp.status_code == 200:
+            games = resp.json()
+            if isinstance(games, list):
+                for g in games:
+                    home = g.get("home_team_name") or (g.get("homeTeam") or {}).get("name", "")
+                    away = g.get("away_team_name") or (g.get("awayTeam") or {}).get("name", "")
+                    if home and away:
+                        h_c = clean_club_key(home)
+                        a_c = clean_club_key(away)
+                        gw_fixtures[h_c] = {"desc": f"vs {away} (Casa)", "has": True, "mult": 1.05}
+                        gw_fixtures[a_c] = {"desc": f"@ {home} (Trasferta)", "has": True, "mult": 0.96}
+    except Exception:
+        pass
+    return gw_fixtures
 
-def resolve_gw_matchup(club_name, league_text):
+def get_club_fixture(club_name, league_text, live_gw_map):
     c_clean = clean_club_key(club_name)
     if "svincolato" in c_clean or c_clean == "":
         return "No Fixture (DNP)", False, 0.0
         
-    for k, data in MATCHUPS_GW.items():
+    for k, data in live_gw_map.items():
         if k in c_clean or c_clean in k:
             return data["desc"], data["has"], data["mult"]
             
-    # Se il club appartiene a un campionato attivo in questo turno
-    if any(pat in league_text for pat in ["portugal", "premier", "serie-a", "laliga", "bundesliga", "ligue", "eredivisie", "scotland"]):
-        return "Partita di Campionato", True, 1.00
-        
-    return "No Fixture (DNP)", False, 0.0
+    # Se il club non ha partite registrate per la GW corrente su Sorare
+    return "No Fixture (DNP)", False, 0.80
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_gallery_data(raw_slug):
     user_slug = extract_slug(raw_slug)
+    live_gw_map = fetch_sorare_live_gw_fixtures()
     raw_cards = []
     cursor = None
     has_next = True
@@ -362,7 +357,6 @@ def fetch_gallery_data(raw_slug):
                 club_n = str(active_club.get("name", "Svincolato"))
                 club_clean = clean_club_key(club_n)
 
-                # Clean Data: titolarità depurata
                 l5_apps = player.get("lastFiveSo5Appearances", 0) or 0
                 starter_rate = round(min(100.0, (l5_apps / 5.0) * 100.0), 1)
                 
@@ -385,8 +379,8 @@ def fetch_gallery_data(raw_slug):
                 l_name = str(domestic_league.get("name", "Altro"))
                 league_full_text = f"{l_name} {l_slug}".lower()
 
-                # Risoluzione matchup GW
-                fixture_desc, has_fixture, matchup_factor = resolve_gw_matchup(club_n, league_full_text)
+                # Calcolo fixture reale GW
+                fixture_desc, has_fixture, matchup_factor = get_club_fixture(club_n, league_full_text, live_gw_map)
                 
                 adj_floor = round(clean_floor * matchup_factor, 1)
                 adj_ceiling = round(clean_ceiling * matchup_factor, 1)
@@ -890,7 +884,7 @@ with tab_gallery:
             column_config={
                 "name": "Calciatore",
                 "club_name": "Club",
-                "fixture_desc": "Match Ufficiale GW",
+                "fixture_desc": "Match Sorare GW",
                 "album_label": "Album Collezione",
                 "position": "Ruolo",
                 "is_in_season": "Stagionalità",
