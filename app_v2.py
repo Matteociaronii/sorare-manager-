@@ -219,12 +219,12 @@ def extract_slug(input_val):
         val = val.split("/")[-1].split("?")[0]
     return val
 
-def clean_club_key(club_name):
-    clean = str(club_name).lower().strip()
+def clean_slug_or_name(val):
+    clean = str(val).lower().replace("-", " ").strip()
     for prefix in ["sl ", "fc ", "as ", "sc ", "rc ", "ac ", "acf ", "futebol clube do ", "sporting clube de "]:
         if clean.startswith(prefix):
             clean = clean[len(prefix):]
-    return clean
+    return clean.strip()
 
 QUERY_CARDS = """
 query GetUserCards($slug: String!, $cursor: String) {
@@ -274,25 +274,97 @@ KNOWN_ACCOUNT_ALBUMS = {
 }
 
 # =============================================================================
-# ENGINE CALENDARIO SORARE SCORES LIVE (AUTOMATICO PER QUALSIASI DATA E GW)
+# MOTORE SINCRONIZZAZIONE AUTOMATICA GAME WEEK SORARE
 # =============================================================================
-@st.cache_data(ttl=600, show_spinner=False)
-def fetch_live_sorare_calendar_feed():
+def get_current_gw_window():
     """
-    Interroga in tempo reale il feed pubblico delle partite di Sorare scores/matches
-    per la finestra della Game Week (oggi + prossimi 3 giorni).
+    Calcola l'intervallo temporale della Game Week corrente Sorare (Weekend o Infrasettimanale).
+    Weekend: da Venerdì a Martedì.
+    Infrasettimanale: da Martedì a Venerdì.
     """
-    fixtures_map = {}
-    base_date = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)
+    weekday = now.weekday()  # 0: Lun, 1: Mar, 2: Mer, 3: Gio, 4: Ven, 5: Sab, 6: Dom
     
-    # Scandaglia le date della finestra attiva della GW
-    for day_offset in range(4):
-        target_date = base_date + timedelta(days=day_offset)
-        date_str = target_date.strftime("%Y-%m-%d")
+    if weekday in [4, 5, 6, 0]:  # Venerdì, Sabato, Domenica, Lunedì
+        days_since_fri = (weekday - 4) % 7
+        start_date = (now - timedelta(days=days_since_fri)).replace(hour=0, minute=0, second=0, microsecond=0)
+        end_date = start_date + timedelta(days=4, hours=23, minutes=59)
+        gw_type = "Weekend"
+    else:  # Martedì, Mercoledì, Giovedì
+        days_since_tue = (weekday - 1) % 7
+        start_date = (now - timedelta(days=days_since_tue)).replace(hour=0, minute=0, second=0, microsecond=0)
+        end_date = start_date + timedelta(days=3, hours=23, minutes=59)
+        gw_type = "Infrasettimanale"
         
-        # 1. Endpoint REST live di Sorare scores per data
+    return start_date, end_date, gw_type
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_live_gw_matches_engine():
+    """
+    Interroga i match di Sorare per l'intera finestra della Game Week attiva.
+    Supporta oggetti polimorfici Club e NationalTeam per non fallire mai.
+    """
+    start_dt, end_dt, gw_type = get_current_gw_window()
+    fixtures_by_team = {}
+    
+    # 1. Query GraphQL polimorfica su 'football.games'
+    query_games_range = f"""
+    query GetSorareGWMatches {{
+      football {{
+        games(startDate: "{start_dt.strftime('%Y-%m-%d')}", endDate: "{end_dt.strftime('%Y-%m-%d')}") {{
+          homeTeam {{
+            ... on Club {{
+              slug
+              name
+            }}
+            ... on NationalTeam {{
+              slug
+              name
+            }}
+          }}
+          awayTeam {{
+            ... on Club {{
+              slug
+              name
+            }}
+            ... on NationalTeam {{
+              slug
+              name
+            }}
+          }}
+        }}
+      }}
+    }}
+    """
+    try:
+        r = requests.post(API_URL, json={"query": query_games_range}, headers=HEADERS, timeout=8)
+        if r.status_code == 200:
+            games = r.json().get("data", {}).get("football", {}).get("games", []) or []
+            for g in games:
+                h_team = g.get("homeTeam") or {}
+                a_team = g.get("awayTeam") or {}
+                h_slug = h_team.get("slug", "")
+                h_name = h_team.get("name", "")
+                a_slug = a_team.get("slug", "")
+                a_name = a_team.get("name", "")
+                
+                if h_name and a_name:
+                    h_keys = [clean_slug_or_name(h_slug), clean_slug_or_name(h_name)]
+                    a_keys = [clean_slug_or_name(a_slug), clean_slug_or_name(a_name)]
+                    
+                    for k in h_keys:
+                        fixtures_by_team[k] = {"desc": f"vs {a_name} (Casa)", "has": True, "mult": 1.05}
+                    for k in a_keys:
+                        fixtures_by_team[k] = {"desc": f"@ {h_name} (Trasferta)", "has": True, "mult": 0.96}
+    except Exception:
+        pass
+
+    # 2. Integrazione feed Sorare scores giornaliero (copertura completa per ogni giorno della GW)
+    num_days = (end_dt - start_dt).days + 1
+    for d in range(num_days):
+        day_str = (start_dt + timedelta(days=d)).strftime("%Y-%m-%d")
         try:
-            url = f"https://api.sorare.com/api/v1/football/games?date={date_str}"
+            url = f"https://api.sorare.com/api/v1/football/games?date={day_str}"
             resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=4)
             if resp.status_code == 200:
                 games_list = resp.json()
@@ -300,51 +372,41 @@ def fetch_live_sorare_calendar_feed():
                     for g in games_list:
                         h = g.get("home_team_name") or (g.get("homeTeam") or {}).get("name", "")
                         a = g.get("away_team_name") or (g.get("awayTeam") or {}).get("name", "")
+                        h_s = g.get("home_team_slug") or (g.get("homeTeam") or {}).get("slug", "")
+                        a_s = g.get("away_team_slug") or (g.get("awayTeam") or {}).get("slug", "")
                         if h and a:
-                            h_clean = clean_club_key(h)
-                            a_clean = clean_club_key(a)
-                            if h_clean not in fixtures_map:
-                                fixtures_map[h_clean] = {"desc": f"vs {a} (Casa)", "has": True, "mult": 1.05}
-                            if a_clean not in fixtures_map:
-                                fixtures_map[a_clean] = {"desc": f"@ {h} (Trasferta)", "has": True, "mult": 0.96}
+                            h_keys = [clean_slug_or_name(h), clean_slug_or_name(h_s)]
+                            a_keys = [clean_slug_or_name(a), clean_slug_or_name(a_s)]
+                            for k in h_keys:
+                                if k and k not in fixtures_by_team:
+                                    fixtures_by_team[k] = {"desc": f"vs {a} (Casa)", "has": True, "mult": 1.05}
+                            for k in a_keys:
+                                if k and k not in fixtures_by_team:
+                                    fixtures_by_team[k] = {"desc": f"@ {h} (Trasferta)", "has": True, "mult": 0.96}
         except Exception:
             pass
 
-    # 2. Query GraphQL di fallback sul calendario partite per data
-    try:
-        today_iso = base_date.strftime("%Y-%m-%d")
-        query_date_games = f"""
-        query GetScoresMatches {{
-          football {{
-            games(startDate: "{today_iso}") {{
-              homeTeam {{ name }}
-              awayTeam {{ name }}
-            }}
-          }}
-        }}
-        """
-        resp_gql = requests.post(API_URL, json={"query": query_date_games}, headers=HEADERS, timeout=4)
-        if resp_gql.status_code == 200:
-            games_node = resp_gql.json().get("data", {}).get("football", {}).get("games", []) or []
-            for g in games_node:
-                h = (g.get("homeTeam") or {}).get("name", "")
-                a = (g.get("awayTeam") or {}).get("name", "")
-                if h and a:
-                    h_clean = clean_club_key(h)
-                    a_clean = clean_club_key(a)
-                    if h_clean not in fixtures_map:
-                        fixtures_map[h_clean] = {"desc": f"vs {a} (Casa)", "has": True, "mult": 1.05}
-                    if a_clean not in fixtures_map:
-                        fixtures_map[a_clean] = {"desc": f"@ {h} (Trasferta)", "has": True, "mult": 0.96}
-    except Exception:
-        pass
+    return fixtures_by_team, gw_type, start_dt, end_dt
 
-    return fixtures_map
+def match_card_fixture(club_name, club_slug, live_fixtures):
+    c_name_clean = clean_slug_or_name(club_name)
+    c_slug_clean = clean_slug_or_name(club_slug)
+    
+    if "svincolato" in c_name_clean or c_name_clean == "":
+        return "No Fixture (DNP)", False, 0.0
+        
+    for k, data in live_fixtures.items():
+        if not k:
+            continue
+        if k == c_slug_clean or k == c_name_clean or k in c_slug_clean or k in c_name_clean or c_name_clean in k:
+            return data["desc"], data["has"], data["mult"]
+            
+    return "No Fixture (DNP)", False, 0.80
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_gallery_data(raw_slug):
     user_slug = extract_slug(raw_slug)
-    live_fixtures = fetch_live_sorare_calendar_feed()
+    live_fixtures, gw_type, start_dt, end_dt = fetch_live_gw_matches_engine()
     
     raw_cards = []
     cursor = None
@@ -386,7 +448,8 @@ def fetch_gallery_data(raw_slug):
 
                 p_name = player.get("displayName", "Calciatore")
                 club_n = str(active_club.get("name", "Svincolato"))
-                club_clean = clean_club_key(club_n)
+                club_s = str(active_club.get("slug", ""))
+                club_clean = clean_slug_or_name(club_n)
 
                 l5_apps = player.get("lastFiveSo5Appearances", 0) or 0
                 starter_rate = round(min(100.0, (l5_apps / 5.0) * 100.0), 1)
@@ -410,17 +473,8 @@ def fetch_gallery_data(raw_slug):
                 l_name = str(domestic_league.get("name", "Altro"))
                 league_full_text = f"{l_name} {l_slug}".lower()
 
-                # RISOLUZIONE DINAMICA LIVE SORARE
-                has_fixture = False
-                fixture_desc = "No Fixture (DNP)"
-                matchup_factor = 0.80
-
-                for k, f_data in live_fixtures.items():
-                    if k in club_clean or club_clean in k:
-                        has_fixture = True
-                        fixture_desc = f_data["desc"]
-                        matchup_factor = f_data["mult"]
-                        break
+                # Risoluzione dinamica match per la finestra GW corrente
+                fixture_desc, has_fixture, matchup_factor = match_card_fixture(club_n, club_s, live_fixtures)
 
                 adj_floor = round(clean_floor * matchup_factor, 1)
                 adj_ceiling = round(clean_ceiling * matchup_factor, 1)
@@ -462,7 +516,7 @@ def fetch_gallery_data(raw_slug):
             break
 
     if not raw_cards:
-        return pd.DataFrame()
+        return pd.DataFrame(), gw_type, start_dt, end_dt
 
     df_cards = pd.DataFrame(raw_cards)
     album_player_counts = df_cards.groupby(["club_clean", "season_year"])["player_slug"].nunique().to_dict()
@@ -503,7 +557,7 @@ def fetch_gallery_data(raw_slug):
         entry["multiplier"] = card_mult
         final_processed.append(entry)
 
-    return pd.DataFrame(final_processed)
+    return pd.DataFrame(final_processed), gw_type, start_dt, end_dt
 
 # ==========================================
 # SESSION STATE
@@ -535,15 +589,15 @@ with col_s2:
         st.session_state["saved_lineups"] = {}
         st.rerun()
 
-with st.spinner("Sincronizzazione calendario live da Sorare Scores..."):
-    df = fetch_gallery_data(user_input)
+with st.spinner("Sincronizzazione in tempo reale dal database Sorare..."):
+    df, gw_type, gw_start, gw_end = fetch_gallery_data(user_input)
 
 if df.empty:
     st.warning("Nessuna carta Limited trovata per questo account.")
     st.stop()
 
 st.sidebar.divider()
-st.sidebar.subheader("🎯 Filtri Calendario & DNP")
+st.sidebar.markdown(f"**Turno Sorare:** `{gw_type}` ({gw_start.strftime('%d/%m')} - {gw_end.strftime('%d/%m')})")
 hide_dnp = st.sidebar.checkbox("Nascondi No-Fixture (DNP)", value=False)
 
 st.sidebar.divider()
@@ -646,10 +700,10 @@ eligible_df = filter_eligible_cards(df, comp_type, selected_competition, single_
 # ==========================================
 # HEADER
 # ==========================================
-st.markdown("""
+st.markdown(f"""
 <div class="brand-header">
     <h1 class="brand-title">XT_MATTY • SORARE PRO HUB</h1>
-    <div class="brand-subtitle">Manager Suite Ufficiale • Sync Live Sorare Scores • Matchup Engine & Hot Streak Tracker</div>
+    <div class="brand-subtitle">Manager Suite Ufficiale • Sync Dinamico GW {gw_type} • Matchup Engine & Hot Streak Tracker</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -668,7 +722,7 @@ with tab_builder:
     is_so7 = ("SO7" in selected_competition)
     slots_needed = ["GK", "DEF 1", "DEF 2", "MID 1", "MID 2", "FWD", "EXTRA"] if is_so7 else ["GK", "DEF", "MID", "FWD", "EXTRA"]
     
-    st.caption(f"Formato: **{'SO7 (7 Titolari Classic)' if is_so7 else 'SO5 (In-Season: Min 4 In-Season + Max 1 Classic)'}** — Carte Limited disponibili: **{len(eligible_df)}**")
+    st.caption(f"Formato: **{'SO7 (7 Titolari Classic)' if is_so7 else 'SO5 (In-Season: Min 4 In-Season + Max 1 Classic)'}** — Carte Limited disponibili: **{len(eligible_df)}** ({gw_type})")
     
     if eligible_df.empty:
         st.warning("Nessuna carta Limited corrisponde ai criteri di questa specifica competizione.")
@@ -712,7 +766,7 @@ with tab_builder:
                     selected_cards[slot] = None
                     
         with col_stats:
-            st.write("##### Monitoraggio Punteggi Attesi (Live Scores Matchup)")
+            st.write(f"##### Monitoraggio Punteggi Attesi ({gw_type})")
             active_lineup = [c for c in selected_cards.values() if c is not None]
             
             if len(active_lineup) == len(slots_needed):
@@ -841,7 +895,7 @@ with tab_h2h:
 # TAB 3: SUITE STRATEGICA & PORTFOLIO BALANCER
 # ==========================================
 with tab_strategy:
-    st.subheader("🧠 Suite Strategica & Gestione Rosa Multi-Torneo")
+    st.subheader(f"🧠 Suite Strategica & Gestione Rosa ({gw_type})")
     col_strat1, col_strat2 = st.columns(2)
     
     with col_strat1:
@@ -900,7 +954,7 @@ with tab_strategy:
 with tab_gallery:
     col_t_title, col_t_view = st.columns([3, 1])
     with col_t_title:
-        st.subheader(f"📊 Rosa Completa Limited ({len(df)} Carte)")
+        st.subheader(f"📊 Rosa Completa Limited ({len(df)} Carte) — Turno {gw_type}")
     with col_t_view:
         view_mode = st.radio("Modalità Vista", ["🃏 Griglia Card", "📋 Tabella Dati"], horizontal=True)
 
@@ -924,7 +978,7 @@ with tab_gallery:
             column_config={
                 "name": "Calciatore",
                 "club_name": "Club",
-                "fixture_desc": "Match Sorare Live",
+                "fixture_desc": f"Match {gw_type} Sorare",
                 "album_label": "Album Collezione",
                 "position": "Ruolo",
                 "is_in_season": "Stagionalità",
