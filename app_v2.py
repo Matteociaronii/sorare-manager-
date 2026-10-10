@@ -1,6 +1,7 @@
 import streamlit as st
 import requests
 import pandas as pd
+import numpy as np
 
 # ==========================================
 # CONFIGURAZIONE PAGINA & BRANDING XT_MATTY
@@ -34,8 +35,8 @@ st.markdown("""
         background: linear-gradient(135deg, rgba(212,175,55,0.12) 0%, rgba(18,24,38,0.7) 100%);
         border: 1px solid rgba(212,175,55,0.3);
         border-radius: 16px;
-        padding: 24px;
-        margin-bottom: 24px;
+        padding: 22px 26px;
+        margin-bottom: 22px;
         box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
         backdrop-filter: blur(10px);
     }
@@ -92,6 +93,7 @@ st.markdown("""
     }
     .badge-inseason { background: rgba(34, 197, 94, 0.2); color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.4); }
     .badge-classic { background: rgba(148, 163, 184, 0.2); color: #cbd5e1; border: 1px solid rgba(148, 163, 184, 0.4); }
+    .badge-alert { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.4); }
     .badge-gold { background: rgba(212, 175, 55, 0.2); color: #F9E27D; border: 1px solid rgba(212, 175, 55, 0.5); }
     
     .metric-glass {
@@ -111,9 +113,40 @@ st.markdown("""
         color: #94a3b8;
         text-transform: uppercase;
     }
+    
+    .alert-box-red {
+        background: rgba(239, 68, 68, 0.15);
+        border: 1px solid rgba(239, 68, 68, 0.45);
+        color: #fca5a5;
+        border-radius: 10px;
+        padding: 12px 16px;
+        margin: 10px 0;
+        font-weight: 600;
+    }
+    .alert-box-green {
+        background: rgba(34, 197, 94, 0.15);
+        border: 1px solid rgba(34, 197, 94, 0.45);
+        color: #86efac;
+        border-radius: 10px;
+        padding: 12px 16px;
+        margin: 10px 0;
+        font-weight: 600;
+    }
+    .alert-box-orange {
+        background: rgba(245, 158, 11, 0.15);
+        border: 1px solid rgba(245, 158, 11, 0.45);
+        color: #fcd34d;
+        border-radius: 10px;
+        padding: 12px 16px;
+        margin: 10px 0;
+        font-weight: 600;
+    }
 </style>
 """, unsafe_allow_html=True)
 
+# ==========================================
+# REGOLE, COSTANTI & DIZIONARI COMPETIZIONI
+# ==========================================
 API_URL = "https://api.sorare.com/graphql"
 IN_SEASON_YEAR = 2026
 
@@ -159,7 +192,7 @@ UEL_UECL_CLUBS_2026_27 = [
     "benfica", "sl benfica", "vitoria", "guimaraes",
     "milan", "ac milan", "juventus", "lazio", "atalanta", "bologna",
     "tottenham", "chelsea", "newcastle",
-    "real sociedad", "athletic club", "celta vigo",
+    "real society", "athletic club", "celta vigo",
     "bayer leverkusen", "leverkusen", "frankfurt", "hoffenheim", "heidenheim",
     "marseille", "lyon", "olympique lyonnais", "nice", "monaco", "brest",
     "ajax", "az alkmaar", "alkmaar", "twente", "utrecht",
@@ -192,7 +225,7 @@ def clean_club_key(club_name):
             clean = clean[len(prefix):]
     return clean
 
-# Query ufficiale Sorare con fragment Card e pictureUrl
+# Query ufficiale Sorare con paginazione cursore
 QUERY_CARDS = """
 query GetUserCards($slug: String!, $cursor: String) {
   user(slug: $slug) {
@@ -208,6 +241,7 @@ query GetUserCards($slug: String!, $cursor: String) {
           pictureUrl
           positionTyped
           grade
+          xp
           season {
             startYear
           }
@@ -280,6 +314,7 @@ def fetch_gallery_data(raw_slug):
                 card_year = card.get("season", {}).get("startYear", 0)
                 is_in_season = (card_year == IN_SEASON_YEAR)
                 grade_val = int(card.get("grade") or 0)
+                xp_val = int(card.get("xp") or 0)
 
                 club_n = str(active_club.get("name", "Svincolato"))
                 club_clean = clean_club_key(club_n)
@@ -287,6 +322,7 @@ def fetch_gallery_data(raw_slug):
                 l5_apps = player.get("lastFiveSo5Appearances", 0) or 0
                 starter_rate = round(min(100.0, (l5_apps / 5.0) * 100.0), 1)
                 
+                # Calcolo base Clean Data
                 mean_l5 = 54.0 if starter_rate >= 80 else (45.0 if starter_rate >= 40 else 35.0)
                 floor_idx = round(mean_l5 * 0.8, 1)
                 ceiling_idx = round(mean_l5 * 1.35, 1)
@@ -305,6 +341,9 @@ def fetch_gallery_data(raw_slug):
                 
                 img_url = card.get("pictureUrl") or player.get("pictureUrl") or ""
 
+                # XP Tracker: calcolo punti per salire di livello (+1%)
+                xp_needed = 250 - (xp_val % 250)
+
                 raw_cards.append({
                     "card_slug": card.get("slug"),
                     "player_slug": player.get("slug"),
@@ -314,6 +353,8 @@ def fetch_gallery_data(raw_slug):
                     "rarity": "Limited",
                     "season_year": card_year,
                     "grade": grade_val,
+                    "xp": xp_val,
+                    "xp_needed": xp_needed,
                     "is_in_season": is_in_season,
                     "club_name": club_n,
                     "club_clean": club_clean,
@@ -380,7 +421,7 @@ def fetch_gallery_data(raw_slug):
     return pd.DataFrame(final_processed)
 
 # ==========================================
-# SESSION STATE
+# GESTIONE SESSION STATE
 # ==========================================
 if "locked_cards" not in st.session_state:
     st.session_state["locked_cards"] = set()
@@ -389,18 +430,25 @@ if "saved_lineups" not in st.session_state:
     st.session_state["saved_lineups"] = {}
 
 # ==========================================
-# SIDEBAR
+# SIDEBAR COMANDI & FILTRI
 # ==========================================
 st.sidebar.markdown("### ⚡ **XT_Matty Command**")
 default_slug = "xt_matty-0d7de6d1-d3e9-42c5-b62a-6cd4dbd8d691"
 user_input = st.sidebar.text_input("Username o Link Club Sorare", value=default_slug)
 
-col_s1, col_s2 = st.columns(2)
-if st.sidebar.button("🔄 Sincronizza Dati GW", use_container_width=True):
-    st.cache_data.clear()
-    st.session_state["locked_cards"] = set()
-    st.session_state["saved_lineups"] = {}
-    st.rerun()
+col_s1, col_s2 = st.sidebar.columns(2)
+with col_s1:
+    if st.button("🔄 Sync GW", use_container_width=True):
+        st.cache_data.clear()
+        st.session_state["locked_cards"] = set()
+        st.session_state["saved_lineups"] = {}
+        st.rerun()
+
+with col_s2:
+    if st.button("🗑️ Sblocca", use_container_width=True):
+        st.session_state["locked_cards"] = set()
+        st.session_state["saved_lineups"] = {}
+        st.rerun()
 
 with st.spinner("Sincronizzazione di tutte le carte Limited del tuo Club..."):
     df = fetch_gallery_data(user_input)
@@ -457,11 +505,9 @@ elif comp_type == "Campionato Singolo Domestico":
 else:
     selected_competition = "All-Star (Classic SO7)"
 
-if st.sidebar.button("🗑️ Sblocca Formazioni", use_container_width=True):
-    st.session_state["locked_cards"] = set()
-    st.session_state["saved_lineups"] = {}
-    st.rerun()
-
+# ==========================================
+# FILTRI DI ELEGGIBILITÀ COMPETIZIONI
+# ==========================================
 def check_is_top_5(row):
     text = row["league_text"]
     if any(exc in text for exc in EXCLUDED_PATTERNS):
@@ -510,22 +556,25 @@ def filter_eligible_cards(data, main_cat, comp_name, single_choice, exclude_lock
 eligible_df = filter_eligible_cards(df, comp_type, selected_competition, single_league_choice)
 
 # ==========================================
-# HEADER BRAND
+# HEADER BRANDING
 # ==========================================
 st.markdown("""
 <div class="brand-header">
     <h1 class="brand-title">XT_MATTY • SORARE PRO HUB</h1>
-    <div class="brand-subtitle">Manager Suite Ufficiale • Sync Gallery Completa • Matrix Card & Statistiche</div>
+    <div class="brand-subtitle">Manager Suite Ufficiale • Sync Gallery Completa • Suite Strategica & Hot Streak Tracker</div>
 </div>
 """, unsafe_allow_html=True)
 
-tab_builder, tab_h2h, tab_gallery = st.tabs([
+tab_builder, tab_h2h, tab_strategy, tab_gallery = st.tabs([
     "🏆 Builder Formazione", 
     "⚔️ Head-to-Head (1v1)", 
-    f"🃏 Rosa Limited ({len(df)} Carte)"
+    "🧠 Suite Strategica & XP",
+    f"📊 Rosa Limited ({len(df)} Carte)"
 ])
 
-# --- TAB 1: BUILDER ---
+# ==========================================
+# TAB 1: BUILDER FORMAZIONE & MONITORAGGIO SOGLIA
+# ==========================================
 with tab_builder:
     st.subheader(f"Composizione: {selected_competition}")
     is_so7 = ("SO7" in selected_competition)
@@ -579,19 +628,22 @@ with tab_builder:
             active_lineup = [c for c in selected_cards.values() if c is not None]
             
             if len(active_lineup) == len(slots_needed):
+                # Controllo regole In-Season
+                is_rules_ok = True
                 if not is_so7:
                     classic_count = sum(1 for c in active_lineup if not c["is_in_season"])
                     in_season_count = sum(1 for c in active_lineup if c["is_in_season"])
                     if classic_count > 1:
-                        st.error(f"⚠️ Limite Superato: {classic_count} carte Classic. Massimo 1 consentita in In-Season!")
+                        st.error(f"⚠️ **Regola Sorare Violata!** Hai inserito {classic_count} carte Classic. Massimo 1 consentita per In-Season!")
+                        is_rules_ok = False
                     else:
                         st.success(f"✅ Requisito In-Season rispettato ({in_season_count} In-Season, {classic_count} Classic).")
                 
                 cap_candidate = max(active_lineup, key=lambda x: x["ceiling_idx"] * x["multiplier"])
                 st.info(f"🎖️ **Capitano Consigliato (+50%):** {cap_candidate['name']}")
                 
-                tot_floor = 0
-                tot_ceiling = 0
+                tot_floor = 0.0
+                tot_ceiling = 0.0
                 for c in active_lineup:
                     mult = c["multiplier"] * (1.5 if c["card_slug"] == cap_candidate["card_slug"] else 1.0)
                     tot_floor += c["floor_idx"] * mult
@@ -603,8 +655,35 @@ with tab_builder:
                 with k2:
                     st.markdown(f'<div class="metric-glass"><div class="metric-val">{tot_ceiling:.1f}</div><div class="metric-lbl">Ceiling Previsto</div></div>', unsafe_allow_html=True)
                 
+                # FEEDBACK DINAMICO PER QUALSIASI SOGLIA OBIETTIVO
+                if game_mode.startswith("Pro"):
+                    st.markdown("---")
+                    if tot_ceiling < target_threshold:
+                        deficit = target_threshold - tot_ceiling
+                        st.markdown(f"""
+                        <div class="alert-box-red">
+                            ❌ <strong>FORMAZIONE NON IDONEA AL TARGET ({target_threshold} pt)</strong><br>
+                            Anche raggiungendo il picco massimo assoluto (Ceiling: {tot_ceiling:.1f} pt), mancano <strong>{deficit:.1f} punti</strong> per coprire la soglia richiesta. Rivedi gli interpreti o abbassa lo step target.
+                        </div>
+                        """, unsafe_allow_html=True)
+                    elif tot_floor >= target_threshold:
+                        surplus = tot_floor - target_threshold
+                        st.markdown(f"""
+                        <div class="alert-box-green">
+                            🎯 <strong>TARGET PIENAMENTE COPERTO IN SICUREZZA ({target_threshold} pt)</strong><br>
+                            La base minima garantita (Floor: {tot_floor:.1f} pt) supera la soglia con un margine di <strong>+{surplus:.1f} punti</strong>. Formazione ad altissima affidabilità!
+                        </div>
+                        """, unsafe_allow_html=True)
+                    else:
+                        st.markdown(f"""
+                        <div class="alert-box-orange">
+                            ⚡ <strong>TARGET RAGGIUNGIBILE TRAMITE CEILING</strong><br>
+                            Il Floor base ({tot_floor:.1f} pt) non è sufficiente, ma con il potenziale Ceiling ({tot_ceiling:.1f} pt) la soglia di {target_threshold} pt può essere superata se i titolari overperformano.
+                        </div>
+                        """, unsafe_allow_html=True)
+
                 st.markdown("###")
-                if st.button("🔒 Salva & Blocca Carte per la GW", use_container_width=True):
+                if st.button("🔒 Salva & Blocca Carte per la GW", use_container_width=True, disabled=not is_rules_ok):
                     for c in active_lineup:
                         st.session_state["locked_cards"].add(c["card_slug"])
                     st.session_state["saved_lineups"][selected_competition] = active_lineup
@@ -615,11 +694,13 @@ with tab_builder:
 
     if st.session_state["saved_lineups"]:
         st.markdown("---")
-        st.markdown("##### 📌 Formazioni Salvate")
+        st.markdown("##### 📌 Formazioni Registrate per la GW")
         for comp_name, lineup in st.session_state["saved_lineups"].items():
             st.caption(f"**{comp_name}**: {', '.join([c['name'] for c in lineup])}")
 
-# --- TAB 2: HEAD TO HEAD ---
+# ==========================================
+# TAB 2: HEAD-TO-HEAD (1v1)
+# ==========================================
 with tab_h2h:
     st.subheader("⚔️ Confronto Diretto Ballottaggi (1v1)")
     col1, col2 = st.columns(2)
@@ -644,7 +725,8 @@ with tab_h2h:
                 <hr style="border-color: rgba(255,255,255,0.1); margin: 12px 0;">
                 <p><strong>Floor Effettivo:</strong> {round(p1['floor_idx'] * p1['multiplier'], 1)} pt</p>
                 <p><strong>Ceiling Effettivo:</strong> {round(p1['ceiling_idx'] * p1['multiplier'], 1)} pt</p>
-                <p><strong>Titolarità Recente:</strong> {p1['starter_rate']}% ({p1['l5_apps']}/5)</p>
+                <p><strong>Titolarità Recente:</strong> {p1['starter_rate']}% ({p1['l5_apps']}/5 presenze)</p>
+                <p><strong>Livello XP:</strong> Lvl {p1['grade']} ({p1['xp']} XP)</p>
             </div>
             """, unsafe_allow_html=True)
 
@@ -662,11 +744,64 @@ with tab_h2h:
                 <hr style="border-color: rgba(255,255,255,0.1); margin: 12px 0;">
                 <p><strong>Floor Effettivo:</strong> {round(p2['floor_idx'] * p2['multiplier'], 1)} pt</p>
                 <p><strong>Ceiling Effettivo:</strong> {round(p2['ceiling_idx'] * p2['multiplier'], 1)} pt</p>
-                <p><strong>Titolarità Recente:</strong> {p2['starter_rate']}% ({p2['l5_apps']}/5)</p>
+                <p><strong>Titolarità Recente:</strong> {p2['starter_rate']}% ({p2['l5_apps']}/5 presenze)</p>
+                <p><strong>Livello XP:</strong> Lvl {p2['grade']} ({p2['xp']} XP)</p>
             </div>
             """, unsafe_allow_html=True)
 
-# --- TAB 3: ROSA GENERALE ---
+# ==========================================
+# TAB 3: SUITE STRATEGICA & XP TRACKER
+# ==========================================
+with tab_strategy:
+    st.subheader("🧠 Suite Strategica & Ottimizzazione")
+    col_strat1, col_strat2 = st.columns(2)
+    
+    with col_strat1:
+        st.markdown("#### 🔗 **Stack Builder (Sinergie di Club)**")
+        st.caption("Identifica combinazioni dello stesso club per massimizzare la correlazione dei punteggi.")
+        
+        club_counts = df["club_name"].value_counts()
+        viable_clubs = club_counts[club_counts >= 2].index.tolist()
+        
+        if viable_clubs:
+            for c_name in viable_clubs:
+                c_players = df[df["club_name"] == c_name]
+                has_gk = any(c_players["position"].str.contains("GK|GOALKEEPER", na=False))
+                has_def = any(c_players["position"].str.contains("DEF|DEFENDER", na=False))
+                
+                badge_type = "🛡️ Clean Sheet Duo (GK + DEF)" if (has_gk and has_def) else "⚽ Asse Tattico Club"
+                st.markdown(f"""
+                <div style="background: rgba(18,24,38,0.55); border-left: 4px solid #D4AF37; padding: 12px; border-radius: 8px; margin-bottom: 10px;">
+                    <div style="font-weight: 700; color: #F9E27D;">{c_name} — {badge_type}</div>
+                    <div style="font-size: 0.85rem; color: #94a3b8; margin-top: 4px;">
+                        Disponibili: {', '.join(c_players['name'].tolist())}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.info("Nessuna coppia dello stesso club disponibile.")
+
+    with col_strat2:
+        st.markdown("#### 📈 **XP Tracker (Soglia Livello Successivo)**")
+        st.caption("Carte a minor distanza dal passaggio di livello (+1% bonus permanente).")
+        
+        xp_sorted = df.sort_values(by="xp_needed").head(7)
+        for _, x_row in xp_sorted.iterrows():
+            st.markdown(f"""
+            <div style="background: rgba(18,24,38,0.55); border: 1px solid rgba(255,255,255,0.06); padding: 10px 14px; border-radius: 8px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center;">
+                <div>
+                    <div style="font-weight: 600;">{x_row['name']} <span style="font-size: 0.8rem; color: #94a3b8;">({x_row['club_name']})</span></div>
+                    <div style="font-size: 0.8rem; color: #94a3b8;">Livello attuale: Lvl {x_row['grade']} ({x_row['xp']} XP)</div>
+                </div>
+                <div>
+                    <span class="badge badge-gold">Mancano {x_row['xp_needed']} XP</span>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+# ==========================================
+# TAB 4: ROSA COMPLETA & TOGGLE VISTA
+# ==========================================
 with tab_gallery:
     col_t_title, col_t_view = st.columns([3, 1])
     with col_t_title:
@@ -675,7 +810,12 @@ with tab_gallery:
         view_mode = st.radio("Modalità Vista", ["🃏 Griglia Card", "📋 Tabella Dati"], horizontal=True)
 
     if view_mode == "📋 Tabella Dati":
-        display_df = df[["name", "club_name", "album_label", "position", "is_in_season", "grade", "level_bonus", "collection_bonus", "season_bonus", "bonus_pct", "multiplier", "floor_idx", "ceiling_idx", "card_slug"]].copy()
+        display_df = df[[
+            "name", "club_name", "album_label", "position", 
+            "is_in_season", "grade", "level_bonus", "collection_bonus", 
+            "season_bonus", "bonus_pct", "multiplier", "floor_idx", 
+            "ceiling_idx", "card_slug"
+        ]].copy()
         display_df["is_in_season"] = display_df["is_in_season"].apply(lambda x: "🟢 In-Season" if x else "⚪ Classic")
         display_df["grade"] = display_df["grade"].apply(lambda x: f"Lvl {x}")
         display_df["level_bonus"] = display_df["level_bonus"].apply(lambda x: f"+{x}%")
