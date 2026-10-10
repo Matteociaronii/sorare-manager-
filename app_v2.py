@@ -93,7 +93,6 @@ st.markdown("""
     }
     .badge-inseason { background: rgba(34, 197, 94, 0.2); color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.4); }
     .badge-classic { background: rgba(148, 163, 184, 0.2); color: #cbd5e1; border: 1px solid rgba(148, 163, 184, 0.4); }
-    .badge-alert { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.4); }
     .badge-gold { background: rgba(212, 175, 55, 0.2); color: #F9E27D; border: 1px solid rgba(212, 175, 55, 0.5); }
     
     .metric-glass {
@@ -119,8 +118,8 @@ st.markdown("""
         border: 1px solid rgba(239, 68, 68, 0.45);
         color: #fca5a5;
         border-radius: 10px;
-        padding: 12px 16px;
-        margin: 10px 0;
+        padding: 14px 16px;
+        margin: 12px 0;
         font-weight: 600;
     }
     .alert-box-green {
@@ -128,8 +127,8 @@ st.markdown("""
         border: 1px solid rgba(34, 197, 94, 0.45);
         color: #86efac;
         border-radius: 10px;
-        padding: 12px 16px;
-        margin: 10px 0;
+        padding: 14px 16px;
+        margin: 12px 0;
         font-weight: 600;
     }
     .alert-box-orange {
@@ -137,16 +136,13 @@ st.markdown("""
         border: 1px solid rgba(245, 158, 11, 0.45);
         color: #fcd34d;
         border-radius: 10px;
-        padding: 12px 16px;
-        margin: 10px 0;
+        padding: 14px 16px;
+        margin: 12px 0;
         font-weight: 600;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# ==========================================
-# REGOLE, COSTANTI & DIZIONARI COMPETIZIONI
-# ==========================================
 API_URL = "https://api.sorare.com/graphql"
 IN_SEASON_YEAR = 2026
 
@@ -225,7 +221,7 @@ def clean_club_key(club_name):
             clean = clean[len(prefix):]
     return clean
 
-# Query ufficiale Sorare con paginazione cursore
+# Query esatta e collaudata funzionante al 100%
 QUERY_CARDS = """
 query GetUserCards($slug: String!, $cursor: String) {
   user(slug: $slug) {
@@ -241,7 +237,6 @@ query GetUserCards($slug: String!, $cursor: String) {
           pictureUrl
           positionTyped
           grade
-          xp
           season {
             startYear
           }
@@ -314,7 +309,6 @@ def fetch_gallery_data(raw_slug):
                 card_year = card.get("season", {}).get("startYear", 0)
                 is_in_season = (card_year == IN_SEASON_YEAR)
                 grade_val = int(card.get("grade") or 0)
-                xp_val = int(card.get("xp") or 0)
 
                 club_n = str(active_club.get("name", "Svincolato"))
                 club_clean = clean_club_key(club_n)
@@ -322,7 +316,6 @@ def fetch_gallery_data(raw_slug):
                 l5_apps = player.get("lastFiveSo5Appearances", 0) or 0
                 starter_rate = round(min(100.0, (l5_apps / 5.0) * 100.0), 1)
                 
-                # Calcolo base Clean Data
                 mean_l5 = 54.0 if starter_rate >= 80 else (45.0 if starter_rate >= 40 else 35.0)
                 floor_idx = round(mean_l5 * 0.8, 1)
                 ceiling_idx = round(mean_l5 * 1.35, 1)
@@ -341,9 +334,6 @@ def fetch_gallery_data(raw_slug):
                 
                 img_url = card.get("pictureUrl") or player.get("pictureUrl") or ""
 
-                # XP Tracker: calcolo punti per salire di livello (+1%)
-                xp_needed = 250 - (xp_val % 250)
-
                 raw_cards.append({
                     "card_slug": card.get("slug"),
                     "player_slug": player.get("slug"),
@@ -353,8 +343,6 @@ def fetch_gallery_data(raw_slug):
                     "rarity": "Limited",
                     "season_year": card_year,
                     "grade": grade_val,
-                    "xp": xp_val,
-                    "xp_needed": xp_needed,
                     "is_in_season": is_in_season,
                     "club_name": club_n,
                     "club_clean": club_clean,
@@ -421,7 +409,7 @@ def fetch_gallery_data(raw_slug):
     return pd.DataFrame(final_processed)
 
 # ==========================================
-# GESTIONE SESSION STATE
+# SESSION STATE
 # ==========================================
 if "locked_cards" not in st.session_state:
     st.session_state["locked_cards"] = set()
@@ -430,7 +418,7 @@ if "saved_lineups" not in st.session_state:
     st.session_state["saved_lineups"] = {}
 
 # ==========================================
-# SIDEBAR COMANDI & FILTRI
+# SIDEBAR
 # ==========================================
 st.sidebar.markdown("### ⚡ **XT_Matty Command**")
 default_slug = "xt_matty-0d7de6d1-d3e9-42c5-b62a-6cd4dbd8d691"
@@ -505,9 +493,6 @@ elif comp_type == "Campionato Singolo Domestico":
 else:
     selected_competition = "All-Star (Classic SO7)"
 
-# ==========================================
-# FILTRI DI ELEGGIBILITÀ COMPETIZIONI
-# ==========================================
 def check_is_top_5(row):
     text = row["league_text"]
     if any(exc in text for exc in EXCLUDED_PATTERNS):
@@ -556,12 +541,12 @@ def filter_eligible_cards(data, main_cat, comp_name, single_choice, exclude_lock
 eligible_df = filter_eligible_cards(df, comp_type, selected_competition, single_league_choice)
 
 # ==========================================
-# HEADER BRANDING
+# HEADER
 # ==========================================
 st.markdown("""
 <div class="brand-header">
     <h1 class="brand-title">XT_MATTY • SORARE PRO HUB</h1>
-    <div class="brand-subtitle">Manager Suite Ufficiale • Sync Gallery Completa • Suite Strategica & Hot Streak Tracker</div>
+    <div class="brand-subtitle">Manager Suite Ufficiale • Sync Gallery Completa • Hot Streak Tracker & Matrix</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -628,7 +613,6 @@ with tab_builder:
             active_lineup = [c for c in selected_cards.values() if c is not None]
             
             if len(active_lineup) == len(slots_needed):
-                # Controllo regole In-Season
                 is_rules_ok = True
                 if not is_so7:
                     classic_count = sum(1 for c in active_lineup if not c["is_in_season"])
@@ -726,7 +710,7 @@ with tab_h2h:
                 <p><strong>Floor Effettivo:</strong> {round(p1['floor_idx'] * p1['multiplier'], 1)} pt</p>
                 <p><strong>Ceiling Effettivo:</strong> {round(p1['ceiling_idx'] * p1['multiplier'], 1)} pt</p>
                 <p><strong>Titolarità Recente:</strong> {p1['starter_rate']}% ({p1['l5_apps']}/5 presenze)</p>
-                <p><strong>Livello XP:</strong> Lvl {p1['grade']} ({p1['xp']} XP)</p>
+                <p><strong>Livello XP:</strong> Lvl {p1['grade']}</p>
             </div>
             """, unsafe_allow_html=True)
 
@@ -745,12 +729,12 @@ with tab_h2h:
                 <p><strong>Floor Effettivo:</strong> {round(p2['floor_idx'] * p2['multiplier'], 1)} pt</p>
                 <p><strong>Ceiling Effettivo:</strong> {round(p2['ceiling_idx'] * p2['multiplier'], 1)} pt</p>
                 <p><strong>Titolarità Recente:</strong> {p2['starter_rate']}% ({p2['l5_apps']}/5 presenze)</p>
-                <p><strong>Livello XP:</strong> Lvl {p2['grade']} ({p2['xp']} XP)</p>
+                <p><strong>Livello XP:</strong> Lvl {p2['grade']}</p>
             </div>
             """, unsafe_allow_html=True)
 
 # ==========================================
-# TAB 3: SUITE STRATEGICA & XP TRACKER
+# TAB 3: SUITE STRATEGICA
 # ==========================================
 with tab_strategy:
     st.subheader("🧠 Suite Strategica & Ottimizzazione")
@@ -782,19 +766,19 @@ with tab_strategy:
             st.info("Nessuna coppia dello stesso club disponibile.")
 
     with col_strat2:
-        st.markdown("#### 📈 **XP Tracker (Soglia Livello Successivo)**")
-        st.caption("Carte a minor distanza dal passaggio di livello (+1% bonus permanente).")
+        st.markdown("#### 📈 **Livelli XP per Carte**")
+        st.caption("Carte con il livello esperienza più alto nella tua collezione.")
         
-        xp_sorted = df.sort_values(by="xp_needed").head(7)
-        for _, x_row in xp_sorted.iterrows():
+        grade_sorted = df.sort_values(by="grade", ascending=False).head(7)
+        for _, x_row in grade_sorted.iterrows():
             st.markdown(f"""
             <div style="background: rgba(18,24,38,0.55); border: 1px solid rgba(255,255,255,0.06); padding: 10px 14px; border-radius: 8px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center;">
                 <div>
                     <div style="font-weight: 600;">{x_row['name']} <span style="font-size: 0.8rem; color: #94a3b8;">({x_row['club_name']})</span></div>
-                    <div style="font-size: 0.8rem; color: #94a3b8;">Livello attuale: Lvl {x_row['grade']} ({x_row['xp']} XP)</div>
+                    <div style="font-size: 0.8rem; color: #94a3b8;">Ruolo: {x_row['position']} | {'In-Season' if x_row['is_in_season'] else 'Classic'}</div>
                 </div>
                 <div>
-                    <span class="badge badge-gold">Mancano {x_row['xp_needed']} XP</span>
+                    <span class="badge badge-gold">Livello {x_row['grade']} (+{x_row['level_bonus']}%)</span>
                 </div>
             </div>
             """, unsafe_allow_html=True)
