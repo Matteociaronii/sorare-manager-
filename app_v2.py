@@ -115,25 +115,28 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
-# GRAPHQL API SORARE UFFICIALE
+# GRAPHQL API SORARE CON PAGINAZIONE COMPLETA (TUTTE LE CARTE)
 # -----------------------------------------------------------------------------
 SORARE_GRAPHQL_URL = "https://api.sorare.com/graphql"
-
 DEFAULT_SLUG = "xt_matty-0d7de6d1-d3e9-42c5-b62a-6cd4dbd8d691"
 
 @st.cache_data(ttl=300)
-def fetch_user_limited_cards(user_slug, jwt_token=""):
+def fetch_all_user_limited_cards(user_slug, jwt_token=""):
     """
-    Recupera esclusivamente le carte Limited reali del club Sorare specificato.
+    Scarica l'intera galleria di carte Limited usando la paginazione cursore (after/endCursor).
     """
     headers = {"Content-Type": "application/json"}
     if jwt_token and jwt_token.strip():
         headers["Authorization"] = f"Bearer {jwt_token.strip()}"
 
     query = """
-    query GetUserLimitedCards($slug: String!) {
+    query GetUserCardsPaginated($slug: String!, $cursor: String) {
       user(slug: $slug) {
-        cards(rarities: [limited]) {
+        cards(rarities: [limited], first: 50, after: $cursor) {
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
           nodes {
             id
             slug
@@ -152,22 +155,6 @@ def fetch_user_limited_cards(user_slug, jwt_token=""):
               }
               lastFiveSo5Appearances
               lastFifteenSo5AverageScore
-              so5Scores(last: 15) {
-                score
-                playerGameStats {
-                  minsPlayed
-                  game {
-                    competition {
-                      type
-                    }
-                  }
-                }
-              }
-              currentFixture {
-                startDate
-                homeTeam { name }
-                awayTeam { name }
-              }
             }
             xp
             bonus
@@ -178,27 +165,40 @@ def fetch_user_limited_cards(user_slug, jwt_token=""):
     }
     """
     
-    try:
-        resp = requests.post(
-            SORARE_GRAPHQL_URL,
-            json={"query": query, "variables": {"slug": user_slug.strip()}},
-            headers=headers,
-            timeout=15
-        )
-        if resp.status_code == 200:
-            res_json = resp.json()
-            if "data" in res_json and res_json["data"] and res_json["data"].get("user"):
-                nodes = res_json["data"]["user"]["cards"]["nodes"]
-                return parse_sorare_nodes(nodes)
-            elif "errors" in res_json:
-                st.error(f"Errore Sorare API: {res_json['errors'][0].get('message')}")
-        else:
-            st.error(f"Chiamata API fallita con codice {resp.status_code}")
-    except Exception as e:
-        st.error(f"Errore di connessione API: {str(e)}")
-    return pd.DataFrame()
+    all_nodes = []
+    cursor = None
+    has_next = True
+    
+    while has_next:
+        try:
+            resp = requests.post(
+                SORARE_GRAPHQL_URL,
+                json={"query": query, "variables": {"slug": user_slug.strip(), "cursor": cursor}},
+                headers=headers,
+                timeout=15
+            )
+            if resp.status_code == 200:
+                res_json = resp.json()
+                if "data" in res_json and res_json["data"] and res_json["data"].get("user"):
+                    cards_data = res_json["data"]["user"]["cards"]
+                    nodes = cards_data.get("nodes", [])
+                    all_nodes.extend(nodes)
+                    
+                    page_info = cards_data.get("pageInfo", {})
+                    has_next = page_info.get("hasNextPage", False)
+                    cursor = page_info.get("endCursor")
+                else:
+                    break
+            else:
+                st.error(f"Errore API Sorare: codice {resp.status_code}")
+                break
+        except Exception as e:
+            st.error(f"Errore di connessione: {str(e)}")
+            break
+            
+    return parse_nodes(all_nodes)
 
-def parse_sorare_nodes(nodes):
+def parse_nodes(nodes):
     parsed = []
     current_season_start = 2026
     
@@ -207,15 +207,12 @@ def parse_sorare_nodes(nodes):
         active_club = (player.get("activeClub") or {}).get("name", "N/A")
         position = (player.get("position") or "EXTRA").upper()
         
-        # Gestione Stagione (In-Season vs Classic)
         start_year = (c.get("season") or {}).get("startYear", 2024)
         is_in_season = (start_year >= current_season_start)
         season_type = "In-Season" if is_in_season else "Classic"
         
-        # Immagine ufficiale (priorità alla card reale, poi foto giocatore)
         img_url = c.get("pictureUrl") or player.get("pictureUrl") or ""
         
-        # Bonus ed Esperienza XP
         raw_bonus = float(c.get("bonus") or 0.0)
         coll_bonus = float(c.get("collectionBonus") or 0.0)
         total_bonus = round(raw_bonus + coll_bonus, 1)
@@ -223,38 +220,9 @@ def parse_sorare_nodes(nodes):
         xp = int(c.get("xp") or 0)
         xp_next = 250 - (xp % 250)
         
-        # Pulizia dati: esclusione subentri < 45 min e partite internazionali
-        so5_scores = player.get("so5Scores") or []
-        filtered_scores = []
-        for s in so5_scores:
-            score = s.get("score")
-            stats = s.get("playerGameStats") or {}
-            mins = stats.get("minsPlayed", 90)
-            c_type = ((stats.get("game") or {}).get("competition") or {}).get("type", "club")
-            
-            if score is not None and mins >= 45 and str(c_type).lower() != "international":
-                filtered_scores.append(score)
-                
-        # Floor (L5 depurato) e Ceiling (L15 depurato)
-        if len(filtered_scores) >= 5:
-            clean_l5 = round(sum(filtered_scores[:5]) / 5.0, 1)
-        else:
-            clean_l5 = round(float(player.get("lastFiveSo5Appearances") or 40.0), 1)
-            
-        if len(filtered_scores) > 0:
-            clean_l15 = round(sum(filtered_scores) / len(filtered_scores), 1)
-        else:
-            clean_l15 = round(float(player.get("lastFifteenSo5AverageScore") or 45.0), 1)
-            
-        # Fixture della GW
-        fixture = player.get("currentFixture")
-        has_fixture = fixture is not None
-        opponent = "No Fixture (DNP)"
-        if has_fixture:
-            home = fixture.get("homeTeam", {}).get("name", "")
-            away = fixture.get("awayTeam", {}).get("name", "")
-            opponent = f"vs {away}" if home == active_club else f"@ {home}"
-            
+        clean_l5 = round(float(player.get("lastFiveSo5Appearances") or 40.0), 1)
+        clean_l15 = round(float(player.get("lastFifteenSo5AverageScore") or 45.0), 1)
+        
         parsed.append({
             "card_id": c.get("id"),
             "name": player.get("displayName") or c.get("name"),
@@ -270,13 +238,13 @@ def parse_sorare_nodes(nodes):
             "collection_bonus": round(coll_bonus, 1),
             "status": "ACTIVE",
             "is_available": True,
-            "has_fixture": has_fixture,
-            "opponent": opponent
+            "has_fixture": True,
+            "opponent": "Partita GW"
         })
     return pd.DataFrame(parsed)
 
 # -----------------------------------------------------------------------------
-# SESSION STATE & CARICAMENTO INIZIALE
+# SESSION STATE & RESET
 # -----------------------------------------------------------------------------
 if "locked_lineups" not in st.session_state:
     st.session_state.locked_lineups = {}
@@ -301,34 +269,31 @@ with st.sidebar:
             st.rerun()
 
     st.markdown("---")
-    st.markdown("#### 🎯 **Filtri Roster**")
+    st.markdown("#### 🎯 **Filtri Rosa**")
     season_filter = st.selectbox("Filtro Stagione", ["Tutte", "In-Season Only", "Classic Only"])
-    fixture_only = st.checkbox("Nascondi No-Fixture (DNP)", value=False)
 
 # -----------------------------------------------------------------------------
-# HEADER PRINCIPALE
+# HEADER
 # -----------------------------------------------------------------------------
 st.markdown("""
 <div class="brand-header">
     <h1 class="brand-title">XT_MATTY • SORARE PRO HUB</h1>
-    <div class="brand-subtitle">Manager Suite Ufficiale • Sync Club Reale • Clean Data Engine • Card Matrix</div>
+    <div class="brand-subtitle">Manager Suite Ufficiale • Sync Club Completo • Card Matrix Reale</div>
 </div>
 """, unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
-# FETCH DATI REALI
+# CARICAMENTO TOTALE DELLA ROSA
 # -----------------------------------------------------------------------------
-df_raw = fetch_user_limited_cards(user_slug, jwt_input)
+with st.spinner("Sincronizzazione di tutte le carte Limited del tuo Club..."):
+    df_raw = fetch_all_user_limited_cards(user_slug, jwt_input)
 
 if df_raw.empty:
     st.warning("⚠️ Nessuna carta Limited trovata per questo account o connessione in corso...")
-    st.info("💡 Suggerimento: Se il tuo profilo Sorare è impostato su privato, inserisci il tuo JWT Token nella barra laterale per sincronizzare le carte.")
     st.stop()
 
 df_pool = df_raw.copy()
 
-if fixture_only:
-    df_pool = df_pool[df_pool["has_fixture"] == True]
 if season_filter == "In-Season Only":
     df_pool = df_pool[df_pool["season_type"] == "In-Season"]
 elif season_filter == "Classic Only":
@@ -344,8 +309,7 @@ df_available = df_pool[~df_pool["card_id"].isin(used_card_ids)].copy()
 def calculate_expected_score(row):
     base = row["clean_l5"]
     bonus_mult = 1.0 + (row["total_bonus_pct"] / 100.0)
-    matchup_mult = 1.05 if "vs " in row["opponent"] else 0.96
-    return round(base * bonus_mult * matchup_mult, 1)
+    return round(base * bonus_mult, 1)
 
 df_available["expected_score"] = df_available.apply(calculate_expected_score, axis=1)
 
@@ -355,7 +319,7 @@ df_available["expected_score"] = df_available.apply(calculate_expected_score, ax
 tab_builder, tab_h2h, tab_roster, tab_strategy = st.tabs([
     "⚔️ Formazioni (SO5 & SO7)", 
     "⚖️ Head-to-Head 1v1", 
-    "🃏 Rosa Limited & Matrix",
+    f"🃏 Rosa Limited ({len(df_pool)} Carte)",
     "🧠 Suite Strategica & XP"
 ])
 
@@ -368,9 +332,9 @@ with tab_builder:
         competition = st.selectbox(
             "Seleziona Competizione Target",
             [
-                "Liga Portugal (In-Season)",
-                "Champion Europe",
+                "Champion Europe (Classic SO7)",
                 "Challenger Europe",
+                "Liga Portugal (In-Season)",
                 "UEFA Champions League",
                 "UEFA Europa/Conference",
                 "All-Star"
@@ -399,7 +363,7 @@ with tab_builder:
                 candidates = df_available[(df_available["position"] == pos_filter) & (~df_available["card_id"].isin(selected_ids))]
             
             if candidates.empty:
-                st.warning("Nessuna carta")
+                st.warning("Nessuna")
                 selected_cards[slot] = None
             else:
                 card_options = {
@@ -440,7 +404,7 @@ with tab_builder:
             status_text = "🛡️ ATTIVO" if stack_detected else "Indipendente"
             st.markdown(f'<div class="metric-glass"><div class="metric-val">{status_text}</div><div class="metric-lbl">Stack Club Correlato</div></div>', unsafe_allow_html=True)
         with k4:
-            safety = "ALTA (100% Starter)" if all(r["clean_l5"] >= 45 for r in chosen_rows) else "MEDIA (Rotazione)"
+            safety = "ALTA" if all(r["clean_l5"] >= 45 for r in chosen_rows) else "MEDIA"
             st.markdown(f'<div class="metric-glass"><div class="metric-val">{safety}</div><div class="metric-lbl">Safety Index</div></div>', unsafe_allow_html=True)
 
         st.markdown("###")
@@ -487,9 +451,8 @@ with tab_h2h:
             <span class="badge {'badge-inseason' if p1['season_type']=='In-Season' else 'badge-classic'}">{p1['season_type']}</span>
             <span class="badge badge-gold">+{p1['total_bonus_pct']}% Bonus</span>
             <hr style="border-color: rgba(255,255,255,0.1); margin: 12px 0;">
-            <p><strong>Floor Depurato (L5):</strong> {p1['clean_l5']}</p>
-            <p><strong>Ceiling Depurato (L15):</strong> {p1['clean_l15']}</p>
-            <p><strong>Prossimo Match:</strong> {p1['opponent']}</p>
+            <p><strong>L5:</strong> {p1['clean_l5']} | <strong>L15:</strong> {p1['clean_l15']}</p>
+            <p><strong>Esperienza XP:</strong> {p1['xp']} (Mancano {p1['xp_next_level']} al lvl succ.)</p>
         </div>
         """, unsafe_allow_html=True)
 
@@ -503,9 +466,8 @@ with tab_h2h:
             <span class="badge {'badge-inseason' if p2['season_type']=='In-Season' else 'badge-classic'}">{p2['season_type']}</span>
             <span class="badge badge-gold">+{p2['total_bonus_pct']}% Bonus</span>
             <hr style="border-color: rgba(255,255,255,0.1); margin: 12px 0;">
-            <p><strong>Floor Depurato (L5):</strong> {p2['clean_l5']}</p>
-            <p><strong>Ceiling Depurato (L15):</strong> {p2['clean_l15']}</p>
-            <p><strong>Prossimo Match:</strong> {p2['opponent']}</p>
+            <p><strong>L5:</strong> {p2['clean_l5']} | <strong>L15:</strong> {p2['clean_l15']}</p>
+            <p><strong>Esperienza XP:</strong> {p2['xp']} (Mancano {p2['xp_next_level']} al lvl succ.)</p>
         </div>
         """, unsafe_allow_html=True)
 
@@ -515,7 +477,7 @@ with tab_h2h:
 with tab_roster:
     col_t_title, col_t_view = st.columns([3, 1])
     with col_t_title:
-        st.markdown(f"#### 🃏 **Club Limited ({len(df_pool)} Carte)**")
+        st.markdown(f"#### 🃏 **Tutte le Carte Limited del Club ({len(df_pool)})**")
     with col_t_view:
         view_mode = st.radio("Visualizzazione", ["🃏 Griglia Card", "📋 Tabella Dati"], horizontal=True)
 
@@ -523,12 +485,11 @@ with tab_roster:
         disp_df = df_pool[[
             "name", "club", "position", "season_type", 
             "clean_l5", "clean_l15", "total_bonus_pct", 
-            "xp_next_level", "opponent"
+            "xp_next_level"
         ]].copy()
         disp_df.columns = [
             "Giocatore", "Club", "Ruolo", "Stagione", 
-            "Floor L5", "Ceiling L15", "Bonus %", 
-            "XP al Lvl Succ.", "Prossimo Turno"
+            "Media L5", "Media L15", "Bonus %", "XP al Lvl Succ."
         ]
         st.dataframe(disp_df, use_container_width=True)
     else:
@@ -539,7 +500,7 @@ with tab_roster:
             cols = st.columns(cards_per_row)
             for j, card in enumerate(row_cards):
                 with cols[j]:
-                    img_elem = f'<img src="{card["picture_url"]}" class="card-img" alt="{card["name"]}">' if card["picture_url"] else '<div style="height:140px; display:flex; align-items:center; justify-content:center; background:#1e293b; border-radius:8px;">Carta Sorare</div>'
+                    img_elem = f'<img src="{card["picture_url"]}" class="card-img" alt="{card["name"]}">' if card["picture_url"] else ''
                     st.markdown(f"""
                     <div class="sorare-card-container">
                         {img_elem}
@@ -550,8 +511,7 @@ with tab_roster:
                             <span class="badge badge-gold">+{card['total_bonus_pct']}%</span>
                         </div>
                         <div style="font-size: 0.8rem; margin-top: 8px; color: #cbd5e1;">
-                            Floor L5: <b>{card['clean_l5']}</b> | Ceil: <b>{card['clean_l15']}</b><br>
-                            {card['opponent']}
+                            L5: <b>{card['clean_l5']}</b> | L15: <b>{card['clean_l15']}</b>
                         </div>
                     </div>
                     """, unsafe_allow_html=True)
@@ -582,11 +542,11 @@ with tab_strategy:
                 </div>
                 """, unsafe_allow_html=True)
         else:
-            st.info("Nessuno stack con 2+ carte dello stesso club trovato nella selezione.")
+            st.info("Nessuno stack con 2+ carte dello stesso club trovato.")
 
     with col_strat2:
         st.markdown("##### 📈 **XP Tracker (Soglia Livello Successivo)**")
-        st.caption("Carte più vicine allo scatto di livello (+1% bonus definitivo).")
+        st.caption("Carte più vicine allo scatto di livello (+1% bonus permanente).")
         
         xp_urgent = df_pool.sort_values(by="xp_next_level").head(6)
         for _, x_row in xp_urgent.iterrows():
