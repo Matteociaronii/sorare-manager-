@@ -145,18 +145,25 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# CONFIGURAZIONE RETE & CHIAVE UFFICIALE
+# RETE & REGOLE COMPETIZIONI
 # ==========================================
 API_URL = "https://api.sorare.com/graphql"
 SORARE_API_KEY = "D8fe705aa08e2e76d2026c63643a7f7f3f64b55c7d2891f51c9fd39c58ae81fd3f44eb177b59020a8ca120bb467e4263df36f21331730b4b6e3e76422f7sr128"
 IN_SEASON_YEAR = 2026
 
-AUTH_HEADERS = {
+# Header standard (garantisce il download delle carte senza blocchi)
+STANDARD_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+    "Content-Type": "application/json",
+    "Accept": "application/json"
+}
+
+# Header con API Key per interrogare le fixtures
+AUTH_KEY_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
     "Content-Type": "application/json",
     "Accept": "application/json",
-    "APIKEY": SORARE_API_KEY,
-    "Authorization": f"Bearer {SORARE_API_KEY}"
+    "APIKEY": SORARE_API_KEY
 }
 
 TOP_5_PATTERNS = ["premier", "laliga", "serie-a", "serie a", "bundesliga", "ligue 1", "ligue-1"]
@@ -228,7 +235,6 @@ def clean_slug_or_name(val):
             clean = clean[len(prefix):]
     return clean.strip()
 
-# Query GraphQL certificata: scarica le proprietà native delle carte
 QUERY_CARDS = """
 query GetUserCards($slug: String!, $cursor: String) {
   user(slug: $slug) {
@@ -269,7 +275,6 @@ query GetUserCards($slug: String!, $cursor: String) {
 }
 """
 
-# Mappatura certificata dei bonus collezione (album) del tuo account
 VERIFIED_ALBUM_BONUSES = {
     "benfica": 5.0,
     "sl benfica": 5.0,
@@ -284,15 +289,16 @@ VERIFIED_ALBUM_BONUSES = {
 }
 
 # =============================================================================
-# ESTRAZIONE FIXTURES GAME WEEK UFFICIALE
+# CALENDARIO SORARE GW
 # =============================================================================
 @st.cache_data(ttl=600, show_spinner=False)
-def fetch_official_sorare_fixtures():
+def fetch_sorare_calendar_fixtures():
     fixtures_map = {}
     active_gw = 21
 
-    query_gw_authenticated = """
-    query GetOfficialSorareGW {
+    # 1. Tentativo con API Key
+    query_gw = """
+    query GetSorareGW {
       football {
         so5Fixture {
           gameWeek
@@ -310,31 +316,32 @@ def fetch_official_sorare_fixtures():
       }
     }
     """
-    try:
-        resp = requests.post(API_URL, json={"query": query_gw_authenticated}, headers=AUTH_HEADERS, timeout=8)
-        if resp.status_code == 200:
-            fixture_data = resp.json().get("data", {}).get("football", {}).get("so5Fixture") or {}
-            if fixture_data:
-                active_gw = fixture_data.get("gameWeek", 21)
-                games = fixture_data.get("games", []) or []
-                for g in games:
-                    h_team = g.get("homeTeam") or {}
-                    a_team = g.get("awayTeam") or {}
-                    h_name = h_team.get("name", "")
-                    a_name = a_team.get("name", "")
-                    h_slug = h_team.get("slug", "")
-                    a_slug = a_team.get("slug", "")
-                    
-                    if h_name and a_name:
-                        for k in [clean_slug_or_name(h_slug), clean_slug_or_name(h_name)]:
-                            if k:
-                                fixtures_map[k] = {"desc": f"vs {a_name} (Casa)", "has": True, "mult": 1.05}
-                        for k in [clean_slug_or_name(a_slug), clean_slug_or_name(a_name)]:
-                            if k:
-                                fixtures_map[k] = {"desc": f"@ {h_name} (Trasferta)", "has": True, "mult": 0.96}
-    except Exception:
-        pass
+    for headers_to_try in [AUTH_KEY_HEADERS, STANDARD_HEADERS]:
+        try:
+            resp = requests.post(API_URL, json={"query": query_gw}, headers=headers_to_try, timeout=6)
+            if resp.status_code == 200:
+                data = resp.json().get("data", {}).get("football", {}).get("so5Fixture") or {}
+                if data:
+                    active_gw = data.get("gameWeek", 21)
+                    games = data.get("games", []) or []
+                    for g in games:
+                        h_team = g.get("homeTeam") or {}
+                        a_team = g.get("awayTeam") or {}
+                        h_name, a_name = h_team.get("name", ""), a_team.get("name", "")
+                        h_slug, a_slug = h_team.get("slug", ""), a_team.get("slug", "")
+                        if h_name and a_name:
+                            for k in [clean_slug_or_name(h_slug), clean_slug_or_name(h_name)]:
+                                if k:
+                                    fixtures_map[k] = {"desc": f"vs {a_name} (Casa)", "has": True, "mult": 1.05}
+                            for k in [clean_slug_or_name(a_slug), clean_slug_or_name(a_name)]:
+                                if k:
+                                    fixtures_map[k] = {"desc": f"@ {h_name} (Trasferta)", "has": True, "mult": 0.96}
+                    if fixtures_map:
+                        break
+        except Exception:
+            pass
 
+    # Match accertati del turno attivo
     confirmed_feed = {
         "fiorentina": {"desc": "@ Genoa (Trasferta)", "has": True, "mult": 1.00},
         "acf fiorentina": {"desc": "@ Genoa (Trasferta)", "has": True, "mult": 1.00},
@@ -376,7 +383,7 @@ def match_card_fixture(club_name, club_slug, fixtures_map):
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_gallery_data(raw_slug):
     user_slug = extract_slug(raw_slug)
-    fixtures_map, active_gw = fetch_official_sorare_fixtures()
+    fixtures_map, active_gw = fetch_sorare_calendar_fixtures()
     
     raw_cards = []
     cursor = None
@@ -385,10 +392,11 @@ def fetch_gallery_data(raw_slug):
     while has_next:
         variables = {"slug": user_slug, "cursor": cursor}
         try:
+            # Chiamata sicura per scaricare le carte
             resp = requests.post(
                 API_URL,
                 json={"query": QUERY_CARDS, "variables": variables},
-                headers=AUTH_HEADERS,
+                headers=STANDARD_HEADERS,
                 timeout=15
             )
             resp_json = resp.json()
@@ -443,7 +451,7 @@ def fetch_gallery_data(raw_slug):
                 l_name = str(domestic_league.get("name", "Altro"))
                 league_full_text = f"{l_name} {l_slug}".lower()
 
-                # Risoluzione dinamica fixture
+                # Risoluzione dinamica della partita
                 fixture_desc, has_fixture, matchup_factor = match_card_fixture(club_n, club_s, fixtures_map)
 
                 adj_floor = round(clean_floor * matchup_factor, 1)
@@ -491,16 +499,14 @@ def fetch_gallery_data(raw_slug):
     df_cards = pd.DataFrame(raw_cards)
     album_player_counts = df_cards.groupby(["club_clean", "season_year"])["player_slug"].nunique().to_dict()
 
-    # =========================================================================
-    # CALCOLO PERCENTUALI ESATTE E PUNTUALI
-    # =========================================================================
+    # Calcolo percentuali e bonus esatti
     final_processed = []
     for _, row in df_cards.iterrows():
         c_clean = row["club_clean"]
         s_year = row["season_year"]
         is_in_s = row["is_in_season"]
 
-        # 1. Bonus Collezione (Album) certificato
+        # 1. Bonus Collezione (Album)
         if c_clean in VERIFIED_ALBUM_BONUSES:
             collection_bonus = VERIFIED_ALBUM_BONUSES[c_clean]
         else:
@@ -518,13 +524,13 @@ def fetch_gallery_data(raw_slug):
             else:
                 collection_bonus = 0.0
 
-        # 2. Bonus Livello (XP reale calcolato su grade)
+        # 2. Bonus Livello (XP)
         level_bonus = float(row["grade"]) * 0.5 if row["grade"] > 10 else float(row["grade"]) * 1.0
         
-        # 3. Bonus Stagione Ufficiale Sorare (+5% su In-Season)
+        # 3. Bonus Stagione (+5% su In-Season)
         season_bonus = 5.0 if is_in_s else 0.0
         
-        # Somma percentuale totale precisa al decimo di punto
+        # Somma percentuale totale
         total_bonus = round(level_bonus + season_bonus + collection_bonus, 1)
         card_mult = round(1.0 + (total_bonus / 100.0), 3)
 
@@ -568,7 +574,7 @@ with col_s2:
         st.session_state["saved_lineups"] = {}
         st.rerun()
 
-with st.spinner("Sincronizzazione ufficiale dal database Sorare..."):
+with st.spinner("Sincronizzazione in tempo reale dal database Sorare..."):
     df, active_gw = fetch_gallery_data(user_input)
 
 if df.empty:
@@ -576,7 +582,7 @@ if df.empty:
     st.stop()
 
 st.sidebar.divider()
-st.sidebar.markdown(f"**Game Week Sorare:** `GW {active_gw}` 🟢 *API Key Attiva*")
+st.sidebar.markdown(f"**Game Week:** `GW {active_gw}` 🟢 *Connesso*")
 hide_dnp = st.sidebar.checkbox("Nascondi No-Fixture (DNP)", value=False)
 
 st.sidebar.divider()
@@ -682,7 +688,7 @@ eligible_df = filter_eligible_cards(df, comp_type, selected_competition, single_
 st.markdown(f"""
 <div class="brand-header">
     <h1 class="brand-title">XT_MATTY • SORARE PRO HUB</h1>
-    <div class="brand-subtitle">Manager Suite Ufficiale • Sync Live GW {active_gw} • Matchup Engine & Precision Bonus</div>
+    <div class="brand-subtitle">Manager Suite Ufficiale • Sync GW {active_gw} • Matchup Engine & Precision Bonus</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -965,7 +971,7 @@ with tab_gallery:
                 "level_bonus": "Bonus XP",
                 "collection_bonus": "Bonus Album",
                 "season_bonus": "Bonus Stagionale",
-                "bonus_pct": "Bonus Totale Ufficiale",
+                "bonus_pct": "Bonus Totale",
                 "multiplier": "Moltiplicatore",
                 "floor_idx": "Floor (Matchup)",
                 "ceiling_idx": "Ceiling (Matchup)",
