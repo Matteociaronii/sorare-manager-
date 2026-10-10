@@ -145,7 +145,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# REGOLE & COSTANTI COMPETIZIONI
+# COSTANTI COMPETIZIONI
 # ==========================================
 API_URL = "https://api.sorare.com/graphql"
 IN_SEASON_YEAR = 2026
@@ -225,7 +225,7 @@ def clean_club_key(club_name):
             clean = clean[len(prefix):]
     return clean
 
-# Query certificata Sorare (con paginazione cursore)
+# Query certificata con recupero della fixture reale (upcomingGames)
 QUERY_CARDS = """
 query GetUserCards($slug: String!, $cursor: String) {
   user(slug: $slug) {
@@ -258,6 +258,14 @@ query GetUserCards($slug: String!, $cursor: String) {
               }
             }
             lastFiveSo5Appearances
+            upcomingGames(first: 1) {
+              homeTeam {
+                name
+              }
+              awayTeam {
+                name
+              }
+            }
           }
         }
       }
@@ -272,23 +280,6 @@ KNOWN_ACCOUNT_ALBUMS = {
     ("porto", 2026): 4.0,
     ("bologna", 2024): 3.0,
 }
-
-# Modello predittivo fixture attivo per la Game Week
-def compute_matchup_context(club_name, league_text):
-    c_clean = clean_club_key(club_name)
-    if "benfica" in c_clean:
-        return {"has_fixture": True, "fixture_desc": "vs Rio Ave (Casa)", "matchup_factor": 1.05}
-    elif "porto" in c_clean:
-        return {"has_fixture": True, "fixture_desc": "@ Braga (Trasferta)", "matchup_factor": 0.96}
-    elif "celtic" in c_clean:
-        return {"has_fixture": True, "fixture_desc": "vs Rangers (Casa)", "matchup_factor": 1.02}
-    elif "bologna" in c_clean:
-        return {"has_fixture": True, "fixture_desc": "vs Atalanta (Casa)", "matchup_factor": 1.00}
-    elif any(x in league_text for x in ["portugal", "premier", "serie-a", "laliga", "bundesliga", "ligue", "eredivisie", "scotland"]):
-        return {"has_fixture": True, "fixture_desc": "Partita GW Attiva", "matchup_factor": 1.00}
-    else:
-        # Se svincolato o lega non attiva in GW
-        return {"has_fixture": False, "fixture_desc": "No Fixture (DNP)", "matchup_factor": 0.0}
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_gallery_data(raw_slug):
@@ -334,21 +325,37 @@ def fetch_gallery_data(raw_slug):
                 club_n = str(active_club.get("name", "Svincolato"))
                 club_clean = clean_club_key(club_n)
 
-                # CLEAN DATA ENGINE: Ponderazione titolarità senza subentri marginali
+                # Estrazione fixture reale di Sorare per la GW
+                upcoming = player.get("upcomingGames", [])
+                has_fixture = False
+                fixture_desc = "No Fixture (DNP)"
+                matchup_factor = 0.85
+                
+                if upcoming and len(upcoming) > 0:
+                    game = upcoming[0]
+                    home_name = (game.get("homeTeam") or {}).get("name", "")
+                    away_name = (game.get("awayTeam") or {}).get("name", "")
+                    
+                    if home_name and away_name:
+                        has_fixture = True
+                        if clean_club_key(home_name) == club_clean:
+                            fixture_desc = f"vs {away_name} (Casa)"
+                            matchup_factor = 1.05
+                        else:
+                            fixture_desc = f"@ {home_name} (Trasferta)"
+                            matchup_factor = 0.96
+
+                # Clean Data Engine: titolarità depurata
                 l5_apps = player.get("lastFiveSo5Appearances", 0) or 0
                 starter_rate = round(min(100.0, (l5_apps / 5.0) * 100.0), 1)
                 
-                # Calcolo base Clean Floor & Ceiling
                 if starter_rate >= 80:
-                    clean_mean = 54.0
                     clean_floor = 45.0
                     clean_ceiling = 72.0
                 elif starter_rate >= 40:
-                    clean_mean = 46.0
                     clean_floor = 36.0
                     clean_ceiling = 62.0
                 else:
-                    clean_mean = 35.0
                     clean_floor = 22.0
                     clean_ceiling = 48.0
 
@@ -361,13 +368,8 @@ def fetch_gallery_data(raw_slug):
                 l_name = str(domestic_league.get("name", "Altro"))
                 league_full_text = f"{l_name} {l_slug}".lower()
 
-                # Engine Calendario GW & Matchup
-                matchup_info = compute_matchup_context(club_n, league_full_text)
-                
-                # Applicazione modificatore matchup predittivo
-                m_factor = matchup_info["matchup_factor"] if matchup_info["has_fixture"] else 0.85
-                adj_floor = round(clean_floor * m_factor, 1)
-                adj_ceiling = round(clean_ceiling * m_factor, 1)
+                adj_floor = round(clean_floor * matchup_factor, 1)
+                adj_ceiling = round(clean_ceiling * matchup_factor, 1)
 
                 season_tag = "In-Season 2026/27" if is_in_season else f"Classic {str(card_year)[-2:]}-{str(card_year+1)[-2:]}"
                 album_label = f"{club_n} ({season_tag})"
@@ -391,10 +393,8 @@ def fetch_gallery_data(raw_slug):
                     "league_slug": l_slug,
                     "league_name": l_name,
                     "league_text": league_full_text,
-                    "has_fixture": matchup_info["has_fixture"],
-                    "fixture_desc": matchup_info["fixture_desc"],
-                    "matchup_factor": m_factor,
-                    "l5_avg": round(clean_mean, 1),
+                    "has_fixture": has_fixture,
+                    "fixture_desc": fixture_desc,
                     "floor_idx": adj_floor,
                     "ceiling_idx": adj_ceiling,
                     "starter_rate": starter_rate,
@@ -688,7 +688,6 @@ with tab_builder:
                 with k2:
                     st.markdown(f'<div class="metric-glass"><div class="metric-val">{tot_ceiling:.1f}</div><div class="metric-lbl">Ceiling Previsto</div></div>', unsafe_allow_html=True)
                 
-                # FEEDBACK DINAMICO PER QUALSIASI SOGLIA OBIETTIVO
                 if game_mode.startswith("Pro"):
                     st.markdown("---")
                     if tot_ceiling < target_threshold:
@@ -818,7 +817,7 @@ with tab_strategy:
 
     with col_strat2:
         st.markdown("#### ⚖️ **Portfolio Balancer (Ripartizione Tornei)**")
-        st.caption("Consigli di allocazione per non sprecare top scorer tra tornei primari e secondari.")
+        st.caption("Consigli di allocazione per non disperdere carte di alto valore tra tornei primari e secondari.")
         
         in_season_cards = df[df["is_in_season"] == True]
         classic_cards = df[df["is_in_season"] == False]
@@ -827,7 +826,7 @@ with tab_strategy:
         <div style="background: rgba(18,24,38,0.55); border: 1px solid rgba(255,255,255,0.06); padding: 14px; border-radius: 8px; margin-bottom: 10px;">
             <div style="font-weight: 600; color: #4ade80;">🟢 Nucleo In-Season ({len(in_season_cards)} Carte)</div>
             <p style="font-size: 0.85rem; color: #94a3b8; margin: 4px 0 0 0;">
-                Priorità assoluta per <strong>Liga Portugal (In-Season SO5)</strong>. Alloca i tuoi titolari garantiti lì per massimizzare il bonus +5% di stagione e i bonus album.
+                Priorità per <strong>Liga Portugal (In-Season SO5)</strong>. Alloca i titolari con fixture favorevole per capitalizzare il bonus di stagione e i bonus collezione.
             </p>
         </div>
         """, unsafe_allow_html=True)
@@ -836,7 +835,7 @@ with tab_strategy:
         <div style="background: rgba(18,24,38,0.55); border: 1px solid rgba(255,255,255,0.06); padding: 14px; border-radius: 8px;">
             <div style="font-weight: 600; color: #cbd5e1;">⚪ Roster Classic ({len(classic_cards)} Carte)</div>
             <p style="font-size: 0.85rem; color: #94a3b8; margin: 4px 0 0 0;">
-                Ottimale per <strong>Champion Europe (SO7)</strong> e <strong>All-Star</strong>. Sfrutta l'ampia rotazione senza consumare lo slot Classic unico nei tornei In-Season.
+                Ideale per <strong>Champion Europe (SO7)</strong> e <strong>All-Star</strong>, sfruttando la profondità della rosa senza intaccare lo slot Classic unico nei tornei In-Season.
             </p>
         </div>
         """, unsafe_allow_html=True)
@@ -871,7 +870,7 @@ with tab_gallery:
             column_config={
                 "name": "Calciatore",
                 "club_name": "Club",
-                "fixture_desc": "Prossimo Match GW",
+                "fixture_desc": "Match Sorare GW",
                 "album_label": "Album Collezione",
                 "position": "Ruolo",
                 "is_in_season": "Stagionalità",
