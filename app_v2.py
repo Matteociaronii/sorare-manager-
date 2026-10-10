@@ -1,10 +1,7 @@
 import streamlit as st
 import requests
-import json
-import re
 import pandas as pd
 import numpy as np
-from datetime import datetime, timezone, timedelta
 
 # ==========================================
 # CONFIGURAZIONE PAGINA & BRANDING XT_MATTY
@@ -151,17 +148,22 @@ st.markdown("""
 # RETE & REGOLE COMPETIZIONI
 # ==========================================
 API_URL = "https://api.sorare.com/graphql"
+SORARE_API_KEY = "D8fe705aa08e2e76d2026c63643a7f7f3f64b55c7d2891f51c9fd39c58ae81fd3f44eb177b59020a8ca120bb467e4263df36f21331730b4b6e3e76422f7sr128"
 IN_SEASON_YEAR = 2026
 
+# Header standard per le carte
 STANDARD_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
     "Content-Type": "application/json",
     "Accept": "application/json"
 }
 
-BROWSER_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+# Header con APIKEY autenticata per estrarre la Game Week nativa
+AUTH_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+    "Content-Type": "application/json",
+    "Accept": "application/json",
+    "APIKEY": SORARE_API_KEY
 }
 
 TOP_5_PATTERNS = ["premier", "laliga", "serie-a", "serie a", "bundesliga", "ligue 1", "ligue-1"]
@@ -218,7 +220,6 @@ UEL_UECL_CLUBS_2026_27 = [
 ]
 HOT_STREAK_STEPS = [320, 360, 380, 420, 440, 470, 550]
 
-# Valori esatti di Bonus Collezione per gli album del tuo club
 VERIFIED_ALBUM_BONUSES = {
     "benfica": 5.0,
     "sl benfica": 5.0,
@@ -248,7 +249,6 @@ def clean_slug_or_name(val):
             clean = clean[len(prefix):]
     return clean.strip()
 
-# Query stabile: priva di campi non supportati per evitare errori 422
 QUERY_CARDS = """
 query GetUserCards($slug: String!, $cursor: String) {
   user(slug: $slug) {
@@ -290,125 +290,99 @@ query GetUserCards($slug: String!, $cursor: String) {
 """
 
 # =============================================================================
-# CALENDARIO COMPLETO GAME WEEK
+# ESTRAZIONE UFFICIALE DINAMICA DELLA GAME WEEK VIA GRAPHQL (ZERO STRINGHE HARDCODED)
 # =============================================================================
-def get_full_gw_days():
-    now = datetime.now(timezone.utc)
-    weekday = now.weekday()
-    if weekday in [4, 5, 6, 0]:
-        days_back = (weekday - 4) % 7
-        start_fri = now - timedelta(days=days_back)
-        gw_type = "Weekend"
-        gw_dates = [(start_fri + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(5)]
-    else:
-        days_back = (weekday - 1) % 7
-        start_tue = now - timedelta(days=days_back)
-        gw_type = "Infrasettimanale"
-        gw_dates = [(start_tue + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(4)]
-    return gw_dates, gw_type
-
-def parse_games_json_recursive(obj, fixtures_dict):
-    if isinstance(obj, dict):
-        if "homeTeam" in obj and "awayTeam" in obj:
-            h_obj = obj.get("homeTeam") or {}
-            a_obj = obj.get("awayTeam") or {}
-            h_name = h_obj.get("name") or obj.get("home_team_name") or ""
-            a_name = a_obj.get("name") or obj.get("away_team_name") or ""
-            h_slug = h_obj.get("slug") or obj.get("home_team_slug") or ""
-            a_slug = a_obj.get("slug") or obj.get("away_team_slug") or ""
-            if h_name and a_name:
-                h_k1, h_k2 = clean_slug_or_name(h_slug), clean_slug_or_name(h_name)
-                a_k1, a_k2 = clean_slug_or_name(a_slug), clean_slug_or_name(a_name)
-                for k in [h_k1, h_k2]:
-                    if k and k not in fixtures_dict:
-                        fixtures_dict[k] = {"desc": f"vs {a_name} (Casa)", "has": True, "mult": 1.05}
-                for k in [a_k1, a_k2]:
-                    if k and k not in fixtures_dict:
-                        fixtures_dict[k] = {"desc": f"@ {h_name} (Trasferta)", "has": True, "mult": 0.96}
-        for v in obj.values():
-            parse_games_json_recursive(v, fixtures_dict)
-    elif isinstance(obj, list):
-        for item in obj:
-            parse_games_json_recursive(item, fixtures_dict)
-
 @st.cache_data(ttl=600, show_spinner=False)
-def fetch_full_gw_fixtures():
+def fetch_live_sorare_gw_fixtures():
     fixtures_map = {}
-    gw_dates, gw_type = get_full_gw_days()
-    active_gw = 21
+    active_gw = "Live"
 
-    # Scansione date della Game Week
-    for day_str in gw_dates:
-        url = f"https://sorare.com/it/football/scores/matches/{day_str}"
+    # Query diretta sulla fixture ufficiale aperta al momento su Sorare
+    query_gw_live = """
+    query GetLiveSo5Fixture {
+      football {
+        so5Fixture {
+          gameWeek
+          games {
+            homeTeam {
+              ... on Club { slug name }
+              ... on NationalTeam { slug name }
+            }
+            awayTeam {
+              ... on Club { slug name }
+              ... on NationalTeam { slug name }
+            }
+          }
+        }
+      }
+    }
+    """
+    try:
+        r = requests.post(API_URL, json={"query": query_gw_live}, headers=AUTH_HEADERS, timeout=8)
+        if r.status_code == 200:
+            so5 = r.json().get("data", {}).get("football", {}).get("so5Fixture") or {}
+            if so5:
+                active_gw = so5.get("gameWeek", "Live")
+                for g in so5.get("games", []):
+                    h_team = g.get("homeTeam") or {}
+                    a_team = g.get("awayTeam") or {}
+                    h_name, a_name = h_team.get("name", ""), a_team.get("name", "")
+                    h_slug, a_slug = h_team.get("slug", ""), a_team.get("slug", "")
+                    if h_name and a_name:
+                        for k in [clean_slug_or_name(h_slug), clean_slug_or_name(h_name)]:
+                            if k:
+                                fixtures_map[k] = {"desc": f"vs {a_name} (Casa)", "has": True, "mult": 1.05}
+                        for k in [clean_slug_or_name(a_slug), clean_slug_or_name(a_name)]:
+                            if k:
+                                fixtures_map[k] = {"desc": f"@ {h_name} (Trasferta)", "has": True, "mult": 0.96}
+    except Exception:
+        pass
+
+    # Fallback su allSo5Fixtures nel caso in cui la fixture attiva sia in fase di transizione
+    if not fixtures_map:
+        query_all_fixtures = """
+        query GetAllFixtures {
+          football {
+            allSo5Fixtures(first: 2) {
+              nodes {
+                gameWeek
+                games {
+                  homeTeam {
+                    ... on Club { slug name }
+                    ... on NationalTeam { slug name }
+                  }
+                  awayTeam {
+                    ... on Club { slug name }
+                    ... on NationalTeam { slug name }
+                  }
+                }
+              }
+            }
+          }
+        }
+        """
         try:
-            r = requests.get(url, headers=BROWSER_HEADERS, timeout=3)
+            r = requests.post(API_URL, json={"query": query_all_fixtures}, headers=AUTH_HEADERS, timeout=8)
             if r.status_code == 200:
-                match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', r.text)
-                if match:
-                    json_data = json.loads(match.group(1))
-                    parse_games_json_recursive(json_data, fixtures_map)
+                nodes = r.json().get("data", {}).get("football", {}).get("allSo5Fixtures", {}).get("nodes", []) or []
+                if nodes:
+                    active_gw = nodes[0].get("gameWeek", active_gw)
+                    for g in nodes[0].get("games", []):
+                        h_team = g.get("homeTeam") or {}
+                        a_team = g.get("awayTeam") or {}
+                        h_name, a_name = h_team.get("name", ""), a_team.get("name", "")
+                        h_slug, a_slug = h_team.get("slug", ""), a_team.get("slug", "")
+                        if h_name and a_name:
+                            for k in [clean_slug_or_name(h_slug), clean_slug_or_name(h_name)]:
+                                if k:
+                                    fixtures_map[k] = {"desc": f"vs {a_name} (Casa)", "has": True, "mult": 1.05}
+                            for k in [clean_slug_or_name(a_slug), clean_slug_or_name(a_name)]:
+                                if k:
+                                    fixtures_map[k] = {"desc": f"@ {h_name} (Trasferta)", "has": True, "mult": 0.96}
         except Exception:
             pass
 
-    # Mappatura match completi del turno (venerdì-martedì)
-    club_fixtures_full_gw = {
-        # SERIE A
-        "fiorentina": {"desc": "@ Genoa (Trasferta)", "has": True, "mult": 1.00},
-        "acf fiorentina": {"desc": "@ Genoa (Trasferta)", "has": True, "mult": 1.00},
-        "genoa": {"desc": "vs Fiorentina (Casa)", "has": True, "mult": 1.00},
-        "bologna": {"desc": "@ Lecce (Trasferta)", "has": True, "mult": 1.00},
-        "como": {"desc": "vs AS Roma (Casa)", "has": True, "mult": 0.98},
-        "roma": {"desc": "@ Como (Trasferta)", "has": True, "mult": 1.02},
-        "inter": {"desc": "vs Parma (Casa)", "has": True, "mult": 1.05},
-        "milan": {"desc": "@ Sassuolo (Trasferta)", "has": True, "mult": 1.02},
-        "juventus": {"desc": "@ Cagliari (Trasferta)", "has": True, "mult": 1.02},
-        "napoli": {"desc": "vs Frosinone (Casa)", "has": True, "mult": 1.06},
-        "lazio": {"desc": "vs Monza (Casa)", "has": True, "mult": 1.05},
-        "atalanta": {"desc": "vs Udinese (Casa)", "has": True, "mult": 1.05},
-        # BUNDESLIGA
-        "stuttgart": {"desc": "@ Paderborn (Trasferta)", "has": True, "mult": 1.04},
-        "paderborn": {"desc": "vs Stuttgart (Casa)", "has": True, "mult": 0.96},
-        "bayern munchen": {"desc": "@ Augsburg (Trasferta)", "has": True, "mult": 1.05},
-        "bayern": {"desc": "@ Augsburg (Trasferta)", "has": True, "mult": 1.05},
-        "augsburg": {"desc": "vs Bayern München (Casa)", "has": True, "mult": 0.95},
-        "borussia dortmund": {"desc": "vs Mainz 05 (Casa)", "has": True, "mult": 1.06},
-        "dortmund": {"desc": "vs Mainz 05 (Casa)", "has": True, "mult": 1.06},
-        "bayer leverkusen": {"desc": "vs Wolfsburg (Casa)", "has": True, "mult": 1.06},
-        "leverkusen": {"desc": "vs Wolfsburg (Casa)", "has": True, "mult": 1.06},
-        "leipzig": {"desc": "@ Bochum (Trasferta)", "has": True, "mult": 1.03},
-        # LIGA PORTUGAL
-        "porto": {"desc": "@ Sporting Braga (Trasferta)", "has": True, "mult": 0.98},
-        "fc porto": {"desc": "@ Sporting Braga (Trasferta)", "has": True, "mult": 0.98},
-        "benfica": {"desc": "vs Rio Ave (Casa)", "has": True, "mult": 1.05},
-        "sl benfica": {"desc": "vs Rio Ave (Casa)", "has": True, "mult": 1.05},
-        "sporting cp": {"desc": "vs Estoril (Casa)", "has": True, "mult": 1.05},
-        "sporting": {"desc": "vs Estoril (Casa)", "has": True, "mult": 1.05},
-        "braga": {"desc": "vs FC Porto (Casa)", "has": True, "mult": 1.00},
-        "sporting braga": {"desc": "vs FC Porto (Casa)", "has": True, "mult": 1.00},
-        "vitoria de guimaraes": {"desc": "vs Moreirense (Casa)", "has": True, "mult": 1.03},
-        "famalicao": {"desc": "@ Gil Vicente (Trasferta)", "has": True, "mult": 0.98},
-        "rio ave": {"desc": "@ Benfica (Trasferta)", "has": True, "mult": 0.93},
-        # PREMIER LEAGUE
-        "arsenal": {"desc": "vs Leeds United (Casa)", "has": True, "mult": 1.06},
-        "chelsea": {"desc": "vs Bournemouth (Casa)", "has": True, "mult": 1.04},
-        "liverpool": {"desc": "vs Manchester City (Casa)", "has": True, "mult": 1.02},
-        "manchester city": {"desc": "@ Liverpool (Trasferta)", "has": True, "mult": 1.01},
-        "manchester united": {"desc": "vs Everton (Casa)", "has": True, "mult": 1.04},
-        "tottenham": {"desc": "vs Crystal Palace (Casa)", "has": True, "mult": 1.04},
-        # SCOTTISH PREMIERSHIP
-        "celtic": {"desc": "vs Aberdeen (Casa)", "has": True, "mult": 1.04},
-        "rangers": {"desc": "@ Kilmarnock (Trasferta)", "has": True, "mult": 0.99},
-        "hearts": {"desc": "vs Motherwell (Casa)", "has": True, "mult": 1.02},
-        # LALIGA
-        "real madrid": {"desc": "vs Espanyol (Casa)", "has": True, "mult": 1.06},
-        "barcelona": {"desc": "@ Sevilla (Trasferta)", "has": True, "mult": 1.02},
-        "atletico madrid": {"desc": "vs Real Sociedad (Casa)", "has": True, "mult": 1.04},
-    }
-    for k, val in club_fixtures_full_gw.items():
-        if k not in fixtures_map:
-            fixtures_map[k] = val
-
-    return fixtures_map, active_gw, gw_type, gw_dates
+    return fixtures_map, active_gw
 
 def match_card_fixture(club_name, club_slug, fixtures_map):
     c_name_clean = clean_slug_or_name(club_name)
@@ -428,7 +402,7 @@ def match_card_fixture(club_name, club_slug, fixtures_map):
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_gallery_data(raw_slug):
     user_slug = extract_slug(raw_slug)
-    fixtures_map, active_gw, gw_type, gw_dates = fetch_full_gw_fixtures()
+    fixtures_map, active_gw = fetch_live_sorare_gw_fixtures()
     
     raw_cards = []
     cursor = None
@@ -495,7 +469,7 @@ def fetch_gallery_data(raw_slug):
                 l_name = str(domestic_league.get("name", "Altro"))
                 league_full_text = f"{l_name} {l_slug}".lower()
 
-                # Risoluzione fixture su tutta la Game Week
+                # Risoluzione dinamica della partita reale
                 fixture_desc, has_fixture, matchup_factor = match_card_fixture(club_n, club_s, fixtures_map)
 
                 adj_floor = round(clean_floor * matchup_factor, 1)
@@ -538,21 +512,18 @@ def fetch_gallery_data(raw_slug):
             break
 
     if not raw_cards:
-        return pd.DataFrame(), active_gw, gw_type, gw_dates
+        return pd.DataFrame(), active_gw
 
     df_cards = pd.DataFrame(raw_cards)
     album_player_counts = df_cards.groupby(["club_clean", "season_year"])["player_slug"].nunique().to_dict()
 
-    # =========================================================================
-    # FORMULA PERCENTUALI UFFICIALI SORARE (AL DECIMO ESATTO)
-    # =========================================================================
+    # Calcolo esatto dei bonus ufficiali
     final_processed = []
     for _, row in df_cards.iterrows():
         c_clean = row["club_clean"]
         s_year = row["season_year"]
         is_in_s = row["is_in_season"]
 
-        # Bonus Album Collezione
         if c_clean in VERIFIED_ALBUM_BONUSES:
             collection_bonus = VERIFIED_ALBUM_BONUSES[c_clean]
         else:
@@ -570,10 +541,7 @@ def fetch_gallery_data(raw_slug):
             else:
                 collection_bonus = 0.0
 
-        # Bonus XP Livello
         level_bonus = float(row["grade"]) * 1.0
-        
-        # Bonus Stagione Ufficiale (+5% In-Season)
         season_bonus = 5.0 if is_in_s else 0.0
 
         total_bonus = round(level_bonus + season_bonus + collection_bonus, 1)
@@ -587,7 +555,7 @@ def fetch_gallery_data(raw_slug):
         entry["multiplier"] = card_mult
         final_processed.append(entry)
 
-    return pd.DataFrame(final_processed), active_gw, gw_type, gw_dates
+    return pd.DataFrame(final_processed), active_gw
 
 # ==========================================
 # SESSION STATE
@@ -619,16 +587,15 @@ with col_s2:
         st.session_state["saved_lineups"] = {}
         st.rerun()
 
-with st.spinner("Sincronizzazione in corso della rosa e del calendario GW..."):
-    df, active_gw, gw_type, gw_dates = fetch_gallery_data(user_input)
+with st.spinner("Sincronizzazione in tempo reale della rosa e dei match ufficiali Sorare..."):
+    df, active_gw = fetch_gallery_data(user_input)
 
 if df.empty:
     st.warning("Nessuna carta Limited trovata per questo account.")
     st.stop()
 
 st.sidebar.divider()
-st.sidebar.markdown(f"**Turno Sorare:** `GW {active_gw} ({gw_type})`")
-st.sidebar.caption(f"Finestra coperta: **{gw_dates[0]} ➔ {gw_dates[-1]}**")
+st.sidebar.markdown(f"**Turno Ufficiale:** `GW {active_gw}` 🟢")
 hide_dnp = st.sidebar.checkbox("Nascondi No-Fixture (DNP)", value=False)
 
 st.sidebar.divider()
@@ -734,7 +701,7 @@ eligible_df = filter_eligible_cards(df, comp_type, selected_competition, single_
 st.markdown(f"""
 <div class="brand-header">
     <h1 class="brand-title">XT_MATTY • SORARE PRO HUB</h1>
-    <div class="brand-subtitle">Manager Suite Ufficiale • GW {active_gw} ({gw_type}) • Precision Bonus & Matchup Engine</div>
+    <div class="brand-subtitle">Manager Suite Ufficiale • Sync Dinamico GW {active_gw} • Matchup Engine & Precision Bonus</div>
 </div>
 """, unsafe_allow_html=True)
 
