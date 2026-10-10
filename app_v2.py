@@ -95,7 +95,6 @@ st.markdown("""
     .badge-classic { background: rgba(148, 163, 184, 0.2); color: #cbd5e1; border: 1px solid rgba(148, 163, 184, 0.4); }
     .badge-gold { background: rgba(212, 175, 55, 0.2); color: #F9E27D; border: 1px solid rgba(212, 175, 55, 0.5); }
     .badge-dnp { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.4); }
-    .badge-intl { background: rgba(59, 130, 246, 0.2); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.4); }
     
     .metric-glass {
         background: rgba(18, 24, 38, 0.5);
@@ -226,9 +225,9 @@ def clean_club_key(club_name):
             clean = clean[len(prefix):]
     return clean
 
-# Query IDENTICA a quella originale funzionante (zero campi illegali, zero 422)
+# Query certificata Sorare originale (nessun campo extra per scongiurare errore 422)
 QUERY_CARDS = """
-query GetUserCards($slug: String!, $cursor: String) {
+query GetUserCards($slug: String!,$cursor: String) {
   user(slug: $slug) {
     cards(first: 25, after: $cursor) {
       pageInfo {
@@ -275,89 +274,68 @@ KNOWN_ACCOUNT_ALBUMS = {
 }
 
 # =============================================================================
-# CALENDARIO COMPLETO SORARE 2026/27 (CLUB + NAZIONALI)
+# ESTRAZIONE DIRETTA PARTITE GAME WEEK DA SORARE (GW 21 & SUCCESSIVE)
 # =============================================================================
-# Mappatura match nazionali dei top player del tuo club
-PLAYER_INTL_GAMES = {
-    "joão palhinha": {"desc": "vs Polonia (Nations League)", "has": True, "mult": 1.05},
-    "palhinha": {"desc": "vs Polonia (Nations League)", "has": True, "mult": 1.05},
-    "diogo costa": {"desc": "vs Polonia (Nations League)", "has": True, "mult": 1.05},
-    "antónio silva": {"desc": "vs Polonia (Nations League)", "has": True, "mult": 1.05},
-    "vangelis pavlidis": {"desc": "@ Inghilterra (Nations League)", "has": True, "mult": 0.97},
-    "pavlidis": {"desc": "@ Inghilterra (Nations League)", "has": True, "mult": 0.97},
-    "anatolii trubin": {"desc": "vs Georgia (Nations League)", "has": True, "mult": 1.03},
-    "trubin": {"desc": "vs Georgia (Nations League)", "has": True, "mult": 1.03},
-    "alisson becker": {"desc": "@ Cile (Qualificazioni Mondiali)", "has": True, "mult": 1.04},
-    "alisson": {"desc": "@ Cile (Qualificazioni Mondiali)", "has": True, "mult": 1.04},
-    "manuel neuer": {"desc": "@ Bosnia (Nations League)", "has": True, "mult": 1.04},
-    "neuer": {"desc": "@ Bosnia (Nations League)", "has": True, "mult": 1.04},
-    "gerónimo rulli": {"desc": "@ Venezuela (Qualificazioni)", "has": True, "mult": 1.03},
-    "rulli": {"desc": "@ Venezuela (Qualificazioni)", "has": True, "mult": 1.03},
-    "gianluigi donnarumma": {"desc": "vs Belgio (Nations League)", "has": True, "mult": 1.02},
-    "donnarumma": {"desc": "vs Belgio (Nations League)", "has": True, "mult": 1.02},
-    "dominik livaković": {"desc": "vs Scozia (Nations League)", "has": True, "mult": 1.04},
-    "livakovic": {"desc": "vs Scozia (Nations League)", "has": True, "mult": 1.04},
-    "łukasz skorupski": {"desc": "@ Portogallo (Nations League)", "has": True, "mult": 0.96},
-    "skorupski": {"desc": "@ Portogallo (Nations League)", "has": True, "mult": 0.96},
-    "lucas chevalier": {"desc": "@ Israele (Nations League)", "has": True, "mult": 1.03},
-    "chevalier": {"desc": "@ Israele (Nations League)", "has": True, "mult": 1.03},
-    "matvey safonov": {"desc": "vs Iran (Amichevole)", "has": True, "mult": 1.02},
-    "safonov": {"desc": "vs Iran (Amichevole)", "has": True, "mult": 1.02},
-}
-
-# Calendario partite club Sorare (campionati, coppe e recuperi attivi)
-CLUB_GAMES_CALENDAR = {
-    "benfica": {"desc": "vs Rio Ave (Taça de Portugal)", "has": True, "mult": 1.05},
-    "porto": {"desc": "vs Sintrense (Taça de Portugal)", "has": True, "mult": 1.06},
-    "sporting": {"desc": "@ Portimonense (Taça de Portugal)", "has": True, "mult": 1.02},
-    "braga": {"desc": "@ 1° Dezembro (Taça de Portugal)", "has": True, "mult": 1.03},
-    "celtic": {"desc": "vs Aberdeen (Premiership)", "has": True, "mult": 1.04},
-    "rangers": {"desc": "@ Kilmarnock (Premiership)", "has": True, "mult": 0.98},
-    "bologna": {"desc": "@ Lecce (Serie A)", "has": True, "mult": 1.00},
-    "fiorentina": {"desc": "@ Lecce (Serie A)", "has": True, "mult": 1.01},
-    "como": {"desc": "vs Parma (Serie A)", "has": True, "mult": 1.02},
-    "paris saint-germain": {"desc": "vs Strasbourg (Ligue 1)", "has": True, "mult": 1.06},
-    "marseille": {"desc": "@ Montpellier (Ligue 1)", "has": True, "mult": 1.01},
-    "saint-étienne": {"desc": "vs Lens (Ligue 1)", "has": True, "mult": 0.99},
-    "bayern munchen": {"desc": "vs Stuttgart (Bundesliga)", "has": True, "mult": 1.04},
-    "bayern": {"desc": "vs Stuttgart (Bundesliga)", "has": True, "mult": 1.04},
-    "bayer 04 leverkusen": {"desc": "vs Eintracht (Bundesliga)", "has": True, "mult": 1.03},
-    "leverkusen": {"desc": "vs Eintracht (Bundesliga)", "has": True, "mult": 1.03},
-    "manchester city": {"desc": "@ Wolves (Premier League)", "has": True, "mult": 1.04},
-    "liverpool": {"desc": "vs Chelsea (Premier League)", "has": True, "mult": 1.03},
-    "chelsea": {"desc": "@ Liverpool (Premier League)", "has": True, "mult": 0.98},
-    "arsenal": {"desc": "@ Bournemouth (Premier League)", "has": True, "mult": 1.03},
-    "barcelona": {"desc": "vs Sevilla (LaLiga)", "has": True, "mult": 1.05},
-    "real madrid": {"desc": "@ Celta Vigo (LaLiga)", "has": True, "mult": 1.03},
-    "inter": {"desc": "@ Roma (Serie A)", "has": True, "mult": 1.00},
-    "milan": {"desc": "vs Udinese (Serie A)", "has": True, "mult": 1.03},
-    "napoli": {"desc": "@ Empoli (Serie A)", "has": True, "mult": 1.03},
-    "rapid wien": {"desc": "vs Hartberg (Bundesliga AT)", "has": True, "mult": 1.02},
-}
-
-def resolve_fixture_bivalent(player_name, club_name, league_text):
-    p_lower = str(player_name).lower().strip()
-    c_clean = clean_club_key(club_name)
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_live_sorare_gw_games():
+    """
+    Interroga Sorare per identificare la Game Week attiva e tutte le relative partite.
+    """
+    gw_number = 21
+    fixtures_map = {}
     
-    # 1. Priorità: partita ufficiale con la Nazionale
-    for k, data in PLAYER_INTL_GAMES.items():
-        if k in p_lower:
-            return data["desc"], True, data["mult"], "intl"
-            
-    # 2. Partita di Club coperta da Sorare
-    for k, data in CLUB_GAMES_CALENDAR.items():
-        if k in c_clean or c_clean in k:
-            return data["desc"], True, data["mult"], "club"
-            
-    # 3. Se svincolato o non convocato
-    if "svincolato" in c_clean or c_clean == "":
-        return "No Fixture (DNP)", False, 0.0, "none"
-        
-    return "No Fixture (DNP)", False, 0.80, "none"
+    # Query radice Sorare per identificare la fixture della GW
+    query_gw = """
+    query GetSorareActiveGW {
+      football {
+        so5Fixture {
+          gameWeek
+          games {
+            homeTeam {
+              name
+              slug
+            }
+            awayTeam {
+              name
+              slug
+            }
+          }
+        }
+      }
+    }
+    """
+    try:
+        resp = requests.post(API_URL, json={"query": query_gw}, headers=HEADERS, timeout=8)
+        if resp.status_code == 200:
+            data = resp.json().get("data", {}).get("football", {}).get("so5Fixture", {}) or {}
+            gw_number = data.get("gameWeek", 21)
+            games = data.get("games", []) or []
+            for g in games:
+                h_name = (g.get("homeTeam") or {}).get("name", "")
+                a_name = (g.get("awayTeam") or {}).get("name", "")
+                if h_name and a_name:
+                    h_clean = clean_club_key(h_name)
+                    a_clean = clean_club_key(a_name)
+                    fixtures_map[h_clean] = {
+                        "desc": f"vs {a_name} (Casa)",
+                        "has": True,
+                        "mult": 1.05
+                    }
+                    fixtures_map[a_clean] = {
+                        "desc": f"@ {h_name} (Trasferta)",
+                        "has": True,
+                        "mult": 0.96
+                    }
+    except Exception:
+        pass
+
+    return gw_number, fixtures_map
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_gallery_data(raw_slug):
     user_slug = extract_slug(raw_slug)
+    gw_num, live_gw_fixtures = fetch_live_sorare_gw_games()
+    
     raw_cards = []
     cursor = None
     has_next = True
@@ -423,11 +401,18 @@ def fetch_gallery_data(raw_slug):
                 l_name = str(domestic_league.get("name", "Altro"))
                 league_full_text = f"{l_name} {l_slug}".lower()
 
-                # Risoluzione fixture reale Sorare 2026/27 (Club o Nazionale)
-                fixture_desc, has_fixture, matchup_factor, match_scope = resolve_fixture_bivalent(
-                    p_name, club_n, league_full_text
-                )
-                
+                # RISOLUZIONE DINAMICA GW: verifica se il club è nel turno Sorare
+                has_fixture = False
+                fixture_desc = "No Fixture (DNP)"
+                matchup_factor = 0.80
+
+                for k, f_data in live_gw_fixtures.items():
+                    if k in club_clean or club_clean in k:
+                        has_fixture = True
+                        fixture_desc = f_data["desc"]
+                        matchup_factor = f_data["mult"]
+                        break
+
                 adj_floor = round(clean_floor * matchup_factor, 1)
                 adj_ceiling = round(clean_ceiling * matchup_factor, 1)
 
@@ -455,7 +440,7 @@ def fetch_gallery_data(raw_slug):
                     "league_text": league_full_text,
                     "has_fixture": has_fixture,
                     "fixture_desc": fixture_desc,
-                    "match_scope": match_scope,
+                    "gw_number": gw_num,
                     "floor_idx": adj_floor,
                     "ceiling_idx": adj_ceiling,
                     "starter_rate": starter_rate,
@@ -469,7 +454,7 @@ def fetch_gallery_data(raw_slug):
             break
 
     if not raw_cards:
-        return pd.DataFrame()
+        return pd.DataFrame(), 21
 
     df_cards = pd.DataFrame(raw_cards)
     album_player_counts = df_cards.groupby(["club_clean", "season_year"])["player_slug"].nunique().to_dict()
@@ -510,7 +495,7 @@ def fetch_gallery_data(raw_slug):
         entry["multiplier"] = card_mult
         final_processed.append(entry)
 
-    return pd.DataFrame(final_processed)
+    return pd.DataFrame(final_processed), gw_num
 
 # ==========================================
 # SESSION STATE
@@ -543,14 +528,14 @@ with col_s2:
         st.rerun()
 
 with st.spinner("Sincronizzazione in tempo reale dal database Sorare..."):
-    df = fetch_gallery_data(user_input)
+    df, active_gw = fetch_gallery_data(user_input)
 
 if df.empty:
     st.warning("Nessuna carta Limited trovata per questo account.")
     st.stop()
 
 st.sidebar.divider()
-st.sidebar.subheader("🎯 Filtri Calendario & DNP")
+st.sidebar.markdown(f"**Game Week Attiva Sorare:** `GW {active_gw}`")
 hide_dnp = st.sidebar.checkbox("Nascondi No-Fixture (DNP)", value=False)
 
 st.sidebar.divider()
@@ -653,10 +638,10 @@ eligible_df = filter_eligible_cards(df, comp_type, selected_competition, single_
 # ==========================================
 # HEADER
 # ==========================================
-st.markdown("""
+st.markdown(f"""
 <div class="brand-header">
     <h1 class="brand-title">XT_MATTY • SORARE PRO HUB</h1>
-    <div class="brand-subtitle">Manager Suite Ufficiale • Sync Gallery Completa • Sorare 2026/27 Live Calendar & Portfolio Balancer</div>
+    <div class="brand-subtitle">Manager Suite Ufficiale • Sync GW {active_gw} Live • Matchup Sorare Dinamico</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -675,7 +660,7 @@ with tab_builder:
     is_so7 = ("SO7" in selected_competition)
     slots_needed = ["GK", "DEF 1", "DEF 2", "MID 1", "MID 2", "FWD", "EXTRA"] if is_so7 else ["GK", "DEF", "MID", "FWD", "EXTRA"]
     
-    st.caption(f"Formato: **{'SO7 (7 Titolari Classic)' if is_so7 else 'SO5 (In-Season: Min 4 In-Season + Max 1 Classic)'}** — Carte Limited disponibili: **{len(eligible_df)}**")
+    st.caption(f"Formato: **{'SO7 (7 Titolari Classic)' if is_so7 else 'SO5 (In-Season: Min 4 In-Season + Max 1 Classic)'}** — Carte Limited disponibili: **{len(eligible_df)}** (GW {active_gw})")
     
     if eligible_df.empty:
         st.warning("Nessuna carta Limited corrisponde ai criteri di questa specifica competizione.")
@@ -719,7 +704,7 @@ with tab_builder:
                     selected_cards[slot] = None
                     
         with col_stats:
-            st.write("##### Monitoraggio Punteggi Attesi (Con Matchup & Bonus)")
+            st.write(f"##### Monitoraggio Punteggi Attesi (GW {active_gw})")
             active_lineup = [c for c in selected_cards.values() if c is not None]
             
             if len(active_lineup) == len(slots_needed):
@@ -780,14 +765,14 @@ with tab_builder:
                     for c in active_lineup:
                         st.session_state["locked_cards"].add(c["card_slug"])
                     st.session_state["saved_lineups"][selected_competition] = active_lineup
-                    st.success("Formazione registrata per questa GW!")
+                    st.success(f"Formazione registrata per la GW {active_gw}!")
                     st.rerun()
             else:
                 st.info(f"Seleziona tutti i {len(slots_needed)} slot per visualizzare le metriche.")
 
     if st.session_state["saved_lineups"]:
         st.markdown("---")
-        st.markdown("##### 📌 Formazioni Registrate per la GW")
+        st.markdown(f"##### 📌 Formazioni Registrate per la GW {active_gw}")
         for comp_name, lineup in st.session_state["saved_lineups"].items():
             st.caption(f"**{comp_name}**: {', '.join([c['name'] for c in lineup])}")
 
@@ -808,7 +793,6 @@ with tab_h2h:
             c1_key = st.selectbox("Seleziona Carta A", list(h2h_options.keys()), index=0)
             p1 = df[df["card_slug"] == h2h_options[c1_key]].iloc[0]
             img_a = f'<img src="{p1["picture_url"]}" class="card-img">' if p1["picture_url"] else ''
-            badge_class = 'badge-inseason' if p1['has_fixture'] and p1['match_scope'] == 'club' else ('badge-intl' if p1['match_scope'] == 'intl' else 'badge-dnp')
             st.markdown(f"""
             <div class="sorare-card-container">
                 {img_a}
@@ -816,7 +800,7 @@ with tab_h2h:
                 <p style="color: #94a3b8;">{p1['club_name']} • {p1['position']}</p>
                 <span class="badge {'badge-inseason' if p1['is_in_season'] else 'badge-classic'}">{'In-Season' if p1['is_in_season'] else 'Classic'}</span>
                 <span class="badge badge-gold">+{p1['bonus_pct']}% Bonus</span>
-                <span class="badge {badge_class}">{p1['fixture_desc']}</span>
+                <span class="badge {'badge-inseason' if p1['has_fixture'] else 'badge-dnp'}">{p1['fixture_desc']}</span>
                 <hr style="border-color: rgba(255,255,255,0.1); margin: 12px 0;">
                 <p><strong>Floor con Matchup:</strong> {round(p1['floor_idx'] * p1['multiplier'], 1)} pt</p>
                 <p><strong>Ceiling con Matchup:</strong> {round(p1['ceiling_idx'] * p1['multiplier'], 1)} pt</p>
@@ -829,7 +813,6 @@ with tab_h2h:
             c2_key = st.selectbox("Seleziona Carta B", list(h2h_options.keys()), index=min(1, len(h2h_options)-1))
             p2 = df[df["card_slug"] == h2h_options[c2_key]].iloc[0]
             img_b = f'<img src="{p2["picture_url"]}" class="card-img">' if p2["picture_url"] else ''
-            badge_class_b = 'badge-inseason' if p2['has_fixture'] and p2['match_scope'] == 'club' else ('badge-intl' if p2['match_scope'] == 'intl' else 'badge-dnp')
             st.markdown(f"""
             <div class="sorare-card-container">
                 {img_b}
@@ -837,7 +820,7 @@ with tab_h2h:
                 <p style="color: #94a3b8;">{p2['club_name']} • {p2['position']}</p>
                 <span class="badge {'badge-inseason' if p2['is_in_season'] else 'badge-classic'}">{'In-Season' if p2['is_in_season'] else 'Classic'}</span>
                 <span class="badge badge-gold">+{p2['bonus_pct']}% Bonus</span>
-                <span class="badge {badge_class_b}">{p2['fixture_desc']}</span>
+                <span class="badge {'badge-inseason' if p2['has_fixture'] else 'badge-dnp'}">{p2['fixture_desc']}</span>
                 <hr style="border-color: rgba(255,255,255,0.1); margin: 12px 0;">
                 <p><strong>Floor con Matchup:</strong> {round(p2['floor_idx'] * p2['multiplier'], 1)} pt</p>
                 <p><strong>Ceiling con Matchup:</strong> {round(p2['ceiling_idx'] * p2['multiplier'], 1)} pt</p>
@@ -850,7 +833,7 @@ with tab_h2h:
 # TAB 3: SUITE STRATEGICA & PORTFOLIO BALANCER
 # ==========================================
 with tab_strategy:
-    st.subheader("🧠 Suite Strategica & Gestione Rosa Multi-Torneo")
+    st.subheader(f"🧠 Suite Strategica & Gestione Rosa (GW {active_gw})")
     col_strat1, col_strat2 = st.columns(2)
     
     with col_strat1:
@@ -909,7 +892,7 @@ with tab_strategy:
 with tab_gallery:
     col_t_title, col_t_view = st.columns([3, 1])
     with col_t_title:
-        st.subheader(f"📊 Rosa Completa Limited ({len(df)} Carte)")
+        st.subheader(f"📊 Rosa Completa Limited ({len(df)} Carte) — GW {active_gw}")
     with col_t_view:
         view_mode = st.radio("Modalità Vista", ["🃏 Griglia Card", "📋 Tabella Dati"], horizontal=True)
 
@@ -933,7 +916,7 @@ with tab_gallery:
             column_config={
                 "name": "Calciatore",
                 "club_name": "Club",
-                "fixture_desc": "Match Sorare 2026/27 GW",
+                "fixture_desc": f"Match Ufficiale Sorare GW {active_gw}",
                 "album_label": "Album Collezione",
                 "position": "Ruolo",
                 "is_in_season": "Stagionalità",
@@ -960,7 +943,7 @@ with tab_gallery:
                 with cols[j]:
                     img_elem = f'<img src="{card["picture_url"]}" class="card-img" alt="{card["name"]}">' if card["picture_url"] else ''
                     is_locked_card = card["card_slug"] in st.session_state["locked_cards"]
-                    b_color = '#4ade80' if card['has_fixture'] and card['match_scope'] == 'club' else ('#60a5fa' if card['match_scope'] == 'intl' else '#f87171')
+                    b_color = '#4ade80' if card['has_fixture'] else '#f87171'
                     st.markdown(f"""
                     <div class="sorare-card-container">
                         {img_elem}
