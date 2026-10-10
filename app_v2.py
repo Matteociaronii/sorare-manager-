@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 import pandas as pd
 import numpy as np
+from datetime import datetime, timezone, timedelta
 
 # ==========================================
 # CONFIGURAZIONE PAGINA & BRANDING XT_MATTY
@@ -145,7 +146,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# COSTANTI COMPETIZIONI
+# REGOLE & COSTANTI COMPETIZIONI
 # ==========================================
 API_URL = "https://api.sorare.com/graphql"
 IN_SEASON_YEAR = 2026
@@ -220,14 +221,13 @@ def extract_slug(input_val):
 
 def clean_club_key(club_name):
     clean = str(club_name).lower().strip()
-    for prefix in ["sl ", "fc ", "as ", "sc ", "rc ", "ac ", "futebol clube do ", "sporting clube de "]:
+    for prefix in ["sl ", "fc ", "as ", "sc ", "rc ", "ac ", "acf ", "futebol clube do ", "sporting clube de "]:
         if clean.startswith(prefix):
             clean = clean[len(prefix):]
     return clean
 
-# Query certificata (struttura protetta originale, zero errori 422)
 QUERY_CARDS = """
-query GetUserCards($slug: String!,$cursor: String) {
+query GetUserCards($slug: String!, $cursor: String) {
   user(slug: $slug) {
     cards(first: 25, after: $cursor) {
       pageInfo {
@@ -274,65 +274,78 @@ KNOWN_ACCOUNT_ALBUMS = {
 }
 
 # =============================================================================
-# CALENDARIO SORARE GW 21 INTEGRATO
+# ENGINE CALENDARIO SORARE SCORES LIVE (AUTOMATICO PER QUALSIASI DATA E GW)
 # =============================================================================
-GW_21_FIXTURES = {
-    # SERIE A
-    "bologna": {"desc": "@ Lecce (Trasferta)", "has": True, "mult": 1.00},
-    "como": {"desc": "vs AS Roma (Casa)", "has": True, "mult": 0.98},
-    "fiorentina": {"desc": "@ Genoa (Trasferta)", "has": True, "mult": 1.01},
-    "inter": {"desc": "vs Parma (Casa)", "has": True, "mult": 1.05},
-    "milan": {"desc": "@ Sassuolo (Trasferta)", "has": True, "mult": 1.02},
-    "napoli": {"desc": "vs Frosinone (Casa)", "has": True, "mult": 1.06},
-    "roma": {"desc": "@ Como (Trasferta)", "has": True, "mult": 1.02},
-    "juventus": {"desc": "@ Cagliari (Trasferta)", "has": True, "mult": 1.02},
-    "lazio": {"desc": "vs Monza (Casa)", "has": True, "mult": 1.04},
-    "atalanta": {"desc": "vs Venezia (Casa)", "has": True, "mult": 1.05},
-    "torino": {"desc": "vs Udinese (Casa)", "has": True, "mult": 1.01},
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_live_sorare_calendar_feed():
+    """
+    Interroga in tempo reale il feed pubblico delle partite di Sorare scores/matches
+    per la finestra della Game Week (oggi + prossimi 3 giorni).
+    """
+    fixtures_map = {}
+    base_date = datetime.now(timezone.utc)
     
-    # PREMIER LEAGUE
-    "arsenal": {"desc": "vs Leeds United (Casa)", "has": True, "mult": 1.06},
-    "chelsea": {"desc": "vs Bournemouth (Casa)", "has": True, "mult": 1.04},
-    "liverpool": {"desc": "vs Manchester City (Casa)", "has": True, "mult": 1.02},
-    "manchester city": {"desc": "@ Liverpool (Trasferta)", "has": True, "mult": 1.01},
-    "manchester united": {"desc": "vs Tottenham (Casa)", "has": True, "mult": 1.02},
-    "tottenham": {"desc": "@ Manchester United (Trasferta)", "has": True, "mult": 0.98},
-    "aston villa": {"desc": "vs Brentford (Casa)", "has": True, "mult": 1.04},
-    "newcastle": {"desc": "@ Coventry City (Trasferta)", "has": True, "mult": 1.03},
-    
-    # LIGA PORTUGAL & TAÇA
-    "benfica": {"desc": "vs Rio Ave (Casa)", "has": True, "mult": 1.06},
-    "porto": {"desc": "@ Sporting Braga (Trasferta)", "has": True, "mult": 0.98},
-    "sporting": {"desc": "vs Estoril (Casa)", "has": True, "mult": 1.05},
-    "braga": {"desc": "vs FC Porto (Casa)", "has": True, "mult": 1.00},
-    
-    # SCOTTISH PREMIERSHIP
-    "celtic": {"desc": "vs Aberdeen (Casa)", "has": True, "mult": 1.05},
-    "rangers": {"desc": "@ Kilmarnock (Trasferta)", "has": True, "mult": 0.99},
-    
-    # LIGUE 1 & BUNDESLIGA
-    "paris saint-germain": {"desc": "vs Strasbourg (Casa)", "has": True, "mult": 1.06},
-    "marseille": {"desc": "@ Montpellier (Trasferta)", "has": True, "mult": 1.02},
-    "bayern munchen": {"desc": "vs Stuttgart (Casa)", "has": True, "mult": 1.05},
-    "bayern": {"desc": "vs Stuttgart (Casa)", "has": True, "mult": 1.05},
-    "leverkusen": {"desc": "vs Holstein Kiel (Casa)", "has": True, "mult": 1.06},
-    "bayer 04 leverkusen": {"desc": "vs Holstein Kiel (Casa)", "has": True, "mult": 1.06},
-}
-
-def resolve_gw_match(club_name):
-    c_clean = clean_club_key(club_name)
-    if "svincolato" in c_clean or c_clean == "":
-        return "No Fixture (DNP)", False, 0.0
+    # Scandaglia le date della finestra attiva della GW
+    for day_offset in range(4):
+        target_date = base_date + timedelta(days=day_offset)
+        date_str = target_date.strftime("%Y-%m-%d")
         
-    for k, data in GW_21_FIXTURES.items():
-        if k in c_clean or c_clean in k:
-            return data["desc"], data["has"], data["mult"]
-            
-    return "No Fixture (DNP)", False, 0.80
+        # 1. Endpoint REST live di Sorare scores per data
+        try:
+            url = f"https://api.sorare.com/api/v1/football/games?date={date_str}"
+            resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=4)
+            if resp.status_code == 200:
+                games_list = resp.json()
+                if isinstance(games_list, list):
+                    for g in games_list:
+                        h = g.get("home_team_name") or (g.get("homeTeam") or {}).get("name", "")
+                        a = g.get("away_team_name") or (g.get("awayTeam") or {}).get("name", "")
+                        if h and a:
+                            h_clean = clean_club_key(h)
+                            a_clean = clean_club_key(a)
+                            if h_clean not in fixtures_map:
+                                fixtures_map[h_clean] = {"desc": f"vs {a} (Casa)", "has": True, "mult": 1.05}
+                            if a_clean not in fixtures_map:
+                                fixtures_map[a_clean] = {"desc": f"@ {h} (Trasferta)", "has": True, "mult": 0.96}
+        except Exception:
+            pass
+
+    # 2. Query GraphQL di fallback sul calendario partite per data
+    try:
+        today_iso = base_date.strftime("%Y-%m-%d")
+        query_date_games = f"""
+        query GetScoresMatches {{
+          football {{
+            games(startDate: "{today_iso}") {{
+              homeTeam {{ name }}
+              awayTeam {{ name }}
+            }}
+          }}
+        }}
+        """
+        resp_gql = requests.post(API_URL, json={"query": query_date_games}, headers=HEADERS, timeout=4)
+        if resp_gql.status_code == 200:
+            games_node = resp_gql.json().get("data", {}).get("football", {}).get("games", []) or []
+            for g in games_node:
+                h = (g.get("homeTeam") or {}).get("name", "")
+                a = (g.get("awayTeam") or {}).get("name", "")
+                if h and a:
+                    h_clean = clean_club_key(h)
+                    a_clean = clean_club_key(a)
+                    if h_clean not in fixtures_map:
+                        fixtures_map[h_clean] = {"desc": f"vs {a} (Casa)", "has": True, "mult": 1.05}
+                    if a_clean not in fixtures_map:
+                        fixtures_map[a_clean] = {"desc": f"@ {h} (Trasferta)", "has": True, "mult": 0.96}
+    except Exception:
+        pass
+
+    return fixtures_map
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_gallery_data(raw_slug):
     user_slug = extract_slug(raw_slug)
+    live_fixtures = fetch_live_sorare_calendar_feed()
+    
     raw_cards = []
     cursor = None
     has_next = True
@@ -375,7 +388,6 @@ def fetch_gallery_data(raw_slug):
                 club_n = str(active_club.get("name", "Svincolato"))
                 club_clean = clean_club_key(club_n)
 
-                # Clean Data: titolarità depurata
                 l5_apps = player.get("lastFiveSo5Appearances", 0) or 0
                 starter_rate = round(min(100.0, (l5_apps / 5.0) * 100.0), 1)
                 
@@ -398,9 +410,18 @@ def fetch_gallery_data(raw_slug):
                 l_name = str(domestic_league.get("name", "Altro"))
                 league_full_text = f"{l_name} {l_slug}".lower()
 
-                # Risoluzione fixture GW 21
-                fixture_desc, has_fixture, matchup_factor = resolve_gw_match(club_n)
-                
+                # RISOLUZIONE DINAMICA LIVE SORARE
+                has_fixture = False
+                fixture_desc = "No Fixture (DNP)"
+                matchup_factor = 0.80
+
+                for k, f_data in live_fixtures.items():
+                    if k in club_clean or club_clean in k:
+                        has_fixture = True
+                        fixture_desc = f_data["desc"]
+                        matchup_factor = f_data["mult"]
+                        break
+
                 adj_floor = round(clean_floor * matchup_factor, 1)
                 adj_ceiling = round(clean_ceiling * matchup_factor, 1)
 
@@ -514,7 +535,7 @@ with col_s2:
         st.session_state["saved_lineups"] = {}
         st.rerun()
 
-with st.spinner("Sincronizzazione in tempo reale dal database Sorare..."):
+with st.spinner("Sincronizzazione calendario live da Sorare Scores..."):
     df = fetch_gallery_data(user_input)
 
 if df.empty:
@@ -522,7 +543,7 @@ if df.empty:
     st.stop()
 
 st.sidebar.divider()
-st.sidebar.markdown("**Turno:** `Game Week 21`")
+st.sidebar.subheader("🎯 Filtri Calendario & DNP")
 hide_dnp = st.sidebar.checkbox("Nascondi No-Fixture (DNP)", value=False)
 
 st.sidebar.divider()
@@ -628,7 +649,7 @@ eligible_df = filter_eligible_cards(df, comp_type, selected_competition, single_
 st.markdown("""
 <div class="brand-header">
     <h1 class="brand-title">XT_MATTY • SORARE PRO HUB</h1>
-    <div class="brand-subtitle">Manager Suite Ufficiale • Sync GW 21 • Matchup Engine & Hot Streak Tracker</div>
+    <div class="brand-subtitle">Manager Suite Ufficiale • Sync Live Sorare Scores • Matchup Engine & Hot Streak Tracker</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -647,7 +668,7 @@ with tab_builder:
     is_so7 = ("SO7" in selected_competition)
     slots_needed = ["GK", "DEF 1", "DEF 2", "MID 1", "MID 2", "FWD", "EXTRA"] if is_so7 else ["GK", "DEF", "MID", "FWD", "EXTRA"]
     
-    st.caption(f"Formato: **{'SO7 (7 Titolari Classic)' if is_so7 else 'SO5 (In-Season: Min 4 In-Season + Max 1 Classic)'}** — Carte Limited disponibili: **{len(eligible_df)}** (GW 21)")
+    st.caption(f"Formato: **{'SO7 (7 Titolari Classic)' if is_so7 else 'SO5 (In-Season: Min 4 In-Season + Max 1 Classic)'}** — Carte Limited disponibili: **{len(eligible_df)}**")
     
     if eligible_df.empty:
         st.warning("Nessuna carta Limited corrisponde ai criteri di questa specifica competizione.")
@@ -691,7 +712,7 @@ with tab_builder:
                     selected_cards[slot] = None
                     
         with col_stats:
-            st.write("##### Monitoraggio Punteggi Attesi (GW 21)")
+            st.write("##### Monitoraggio Punteggi Attesi (Live Scores Matchup)")
             active_lineup = [c for c in selected_cards.values() if c is not None]
             
             if len(active_lineup) == len(slots_needed):
@@ -752,14 +773,14 @@ with tab_builder:
                     for c in active_lineup:
                         st.session_state["locked_cards"].add(c["card_slug"])
                     st.session_state["saved_lineups"][selected_competition] = active_lineup
-                    st.success("Formazione registrata per la GW 21!")
+                    st.success("Formazione registrata per questo turno!")
                     st.rerun()
             else:
                 st.info(f"Seleziona tutti i {len(slots_needed)} slot per visualizzare le metriche.")
 
     if st.session_state["saved_lineups"]:
         st.markdown("---")
-        st.markdown("##### 📌 Formazioni Registrate per la GW 21")
+        st.markdown("##### 📌 Formazioni Registrate per la GW")
         for comp_name, lineup in st.session_state["saved_lineups"].items():
             st.caption(f"**{comp_name}**: {', '.join([c['name'] for c in lineup])}")
 
@@ -820,7 +841,7 @@ with tab_h2h:
 # TAB 3: SUITE STRATEGICA & PORTFOLIO BALANCER
 # ==========================================
 with tab_strategy:
-    st.subheader("🧠 Suite Strategica & Gestione Rosa (GW 21)")
+    st.subheader("🧠 Suite Strategica & Gestione Rosa Multi-Torneo")
     col_strat1, col_strat2 = st.columns(2)
     
     with col_strat1:
@@ -879,7 +900,7 @@ with tab_strategy:
 with tab_gallery:
     col_t_title, col_t_view = st.columns([3, 1])
     with col_t_title:
-        st.subheader(f"📊 Rosa Completa Limited ({len(df)} Carte) — GW 21")
+        st.subheader(f"📊 Rosa Completa Limited ({len(df)} Carte)")
     with col_t_view:
         view_mode = st.radio("Modalità Vista", ["🃏 Griglia Card", "📋 Tabella Dati"], horizontal=True)
 
@@ -903,7 +924,7 @@ with tab_gallery:
             column_config={
                 "name": "Calciatore",
                 "club_name": "Club",
-                "fixture_desc": "Match GW 21",
+                "fixture_desc": "Match Sorare Live",
                 "album_label": "Album Collezione",
                 "position": "Ruolo",
                 "is_in_season": "Stagionalità",
