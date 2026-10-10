@@ -2,7 +2,6 @@ import streamlit as st
 import requests
 import pandas as pd
 import numpy as np
-from datetime import datetime, timezone, timedelta
 
 # ==========================================
 # CONFIGURAZIONE PAGINA & BRANDING XT_MATTY
@@ -226,7 +225,7 @@ def clean_club_key(club_name):
             clean = clean[len(prefix):]
     return clean
 
-# Query certificata Sorare
+# Query certificata Sorare con currentFixture ufficiale da activeClub
 QUERY_CARDS = """
 query GetUserCards($slug: String!, $cursor: String) {
   user(slug: $slug) {
@@ -253,6 +252,14 @@ query GetUserCards($slug: String!, $cursor: String) {
             activeClub {
               slug
               name
+              currentFixture {
+                homeTeam {
+                  name
+                }
+                awayTeam {
+                  name
+                }
+              }
               domesticLeague {
                 slug
                 name
@@ -274,81 +281,9 @@ KNOWN_ACCOUNT_ALBUMS = {
     ("bologna", 2024): 3.0,
 }
 
-# =============================================================================
-# LIVE ENGINE CALENDARIO & MATCHUP (AGGIORNAMENTO AUTOMATICO A FONTI SPORTIVE)
-# =============================================================================
-@st.cache_data(ttl=900, show_spinner=False)
-def fetch_live_fixtures_calendar():
-    """
-    Recupera i match delle leghe principali tramite API live gratuita (TheSportsDB).
-    Copre Liga Portugal, Premier League, Serie A, Champions League, ecc.
-    """
-    leagues_ids = {
-        "4344": "Liga Portugal",
-        "4328": "Premier League",
-        "4332": "Serie A",
-        "4335": "La Liga",
-        "4331": "Bundesliga",
-        "4334": "Ligue 1",
-        "4337": "Eredivisie",
-        "4338": "Scottish Premiership",
-        "4480": "UEFA Champions League"
-    }
-    
-    fixtures_by_club = {}
-    
-    for l_id in leagues_ids.keys():
-        try:
-            url = f"https://www.thesportsdb.com/api/v1/json/3/eventsnextleague.php?id={l_id}"
-            r = requests.get(url, timeout=3)
-            if r.status_code == 200:
-                data = r.json()
-                events = data.get("events") or []
-                for ev in events:
-                    home = ev.get("strHomeTeam", "")
-                    away = ev.get("strAwayTeam", "")
-                    
-                    if home and away:
-                        h_clean = clean_club_key(home)
-                        a_clean = clean_club_key(away)
-                        
-                        fixtures_by_club[h_clean] = {
-                            "has_fixture": True,
-                            "fixture_desc": f"vs {away} (Casa)",
-                            "matchup_factor": 1.05
-                        }
-                        fixtures_by_club[a_clean] = {
-                            "has_fixture": True,
-                            "fixture_desc": f"@ {home} (Trasferta)",
-                            "matchup_factor": 0.96
-                        }
-        except Exception:
-            continue
-            
-    return fixtures_by_club
-
-def resolve_fixture(club_name, league_text, live_fixtures):
-    c_clean = clean_club_key(club_name)
-    
-    # 1. Ricerca nella mappa live scaricata in tempo reale
-    for key, data in live_fixtures.items():
-        if key in c_clean or c_clean in key:
-            return data["fixture_desc"], data["has_fixture"], data["matchup_factor"]
-            
-    # 2. Controllo DNP per svincolati o campionati non in calendario
-    if "svincolato" in c_clean or c_clean == "" or "free" in c_clean:
-        return "No Fixture (DNP)", False, 0.0
-        
-    # 3. Default attivo se il club appartiene a un campionato attivo nella GW
-    if any(pat in league_text for pat in ["portugal", "premier", "serie-a", "laliga", "bundesliga", "ligue", "eredivisie", "scotland"]):
-        return "Match GW Attivo", True, 1.00
-        
-    return "No Fixture (DNP)", False, 0.0
-
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_gallery_data(raw_slug):
     user_slug = extract_slug(raw_slug)
-    live_fixtures = fetch_live_fixtures_calendar()
     raw_cards = []
     cursor = None
     has_next = True
@@ -390,6 +325,24 @@ def fetch_gallery_data(raw_slug):
                 club_n = str(active_club.get("name", "Svincolato"))
                 club_clean = clean_club_key(club_n)
 
+                # Controllo fixture direttamente dai dati ufficiali Sorare del Club
+                fixture_obj = active_club.get("currentFixture")
+                has_fixture = False
+                fixture_desc = "No Fixture (DNP)"
+                matchup_factor = 0.80
+
+                if fixture_obj:
+                    h_team = (fixture_obj.get("homeTeam") or {}).get("name", "")
+                    a_team = (fixture_obj.get("awayTeam") or {}).get("name", "")
+                    if h_team and a_team:
+                        has_fixture = True
+                        if clean_club_key(h_team) == club_clean:
+                            fixture_desc = f"vs {a_team} (Casa)"
+                            matchup_factor = 1.05
+                        else:
+                            fixture_desc = f"@ {h_team} (Trasferta)"
+                            matchup_factor = 0.96
+
                 # Clean Data: titolarità depurata
                 l5_apps = player.get("lastFiveSo5Appearances", 0) or 0
                 starter_rate = round(min(100.0, (l5_apps / 5.0) * 100.0), 1)
@@ -413,9 +366,6 @@ def fetch_gallery_data(raw_slug):
                 l_name = str(domestic_league.get("name", "Altro"))
                 league_full_text = f"{l_name} {l_slug}".lower()
 
-                # Risoluzione automatica calendario
-                fixture_desc, has_fixture, matchup_factor = resolve_fixture(club_n, league_full_text, live_fixtures)
-                
                 adj_floor = round(clean_floor * matchup_factor, 1)
                 adj_ceiling = round(clean_ceiling * matchup_factor, 1)
 
@@ -643,7 +593,7 @@ eligible_df = filter_eligible_cards(df, comp_type, selected_competition, single_
 st.markdown("""
 <div class="brand-header">
     <h1 class="brand-title">XT_MATTY • SORARE PRO HUB</h1>
-    <div class="brand-subtitle">Manager Suite Ufficiale • Sync Gallery Completa • Live Calendar Matchup & Portfolio Balancer</div>
+    <div class="brand-subtitle">Manager Suite Ufficiale • Sync Gallery Completa • Sorare Matchup Engine & Portfolio Balancer</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -918,7 +868,7 @@ with tab_gallery:
             column_config={
                 "name": "Calciatore",
                 "club_name": "Club",
-                "fixture_desc": "Match Live GW",
+                "fixture_desc": "Match Ufficiale Sorare GW",
                 "album_label": "Album Collezione",
                 "position": "Ruolo",
                 "is_in_season": "Stagionalità",
